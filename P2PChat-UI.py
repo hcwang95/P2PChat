@@ -19,7 +19,7 @@ import time
 # Global constant
 #
 BUFSIZ = 1024
-PROTOCALEND = '::\r\n'
+PROTOCAL_END = '::\r\n'
 #
 # Global variables
 #
@@ -54,25 +54,34 @@ class User():
 		## here we define the username validation rule
 		self.validation = re.compile("^[\x00-\x7F]+$")
 		self._socketSetup(serverIP, serverPort, localIP, localPort)
-	def _socketSetup(self, serverIP, serverPort, localIP, localPort):
+	def _socketSetup(self, serverIP=None, serverPort=None, localIP=None, localPort=None):
 		print("setting up user socket...")
-		self._clientSocket = socket.socket()
-		self._serverSocket = socket.socket()
-		# connect with room server with clientsocket
-		try:
-			self._clientSocket.connect((serverIP, serverPort))
-		except socket.error as errmsg:
-			print('Failed to connect to roomServer: ', errmsg)
-			self._clientSocket.close()
-			sys.exit(1)
-		try:
-			self._serverSocket.bind((localIP,localPort))
-		except socket.error as emsg:
-			print("Socket bind error: ", emsg)
-			self._serverSocket.close()
-			sys.exit(1)
-		print('finish setting user socket: connected to roomserver[',
-				serverIP,',',serverPort,'], listening at port ', localPort)
+		if (serverIP is not None and serverPort is not None):
+			self._clientSocket = socket.socket()
+			# connect with room server with clientsocket
+			try:
+				self._clientSocket.connect((serverIP, serverPort))
+			except socket.error as errmsg:
+				print('Failed to connect to roomServer: ', errmsg)
+				self._clientSocket.close()
+			print('finish setting user socket: connected to roomserver[',
+				serverIP,',',serverPort,']')
+		if (localPort is not None)
+			self._serverSocket = socket.socket()
+			try:
+				self._clientSocket.connect((serverIP, serverPort))
+			except socket.error as errmsg:
+				print('Failed to connect to roomServer: ', errmsg)
+				self._clientSocket.close()
+			try:
+				self._serverSocket.bind((localIP,localPort))
+			except socket.error as emsg:
+				print("Socket bind error: ", emsg)
+				self._serverSocket.close()
+			print('finish setting user socket: open server port:', localPort)
+	# def resumeConnectionToServer(self):
+	# 	print('conduct resuming process')
+	# 	self._socketSetup(self._getip)
 	def _setname(self, name):
 		self._username = name
 	def _setip(self, ip):
@@ -116,16 +125,20 @@ class State():
 	def _getroominfo(self):
 		return self._roominfo
 	def stateTransition(self, action):
-		self._setstate(transition(self._getstate,action))
+		self._setstate(transition(self._getstate(),action))
 	def updateRoomName(self, roomName):
 		self._setroomname(roomName)
 	def updateRoomInfo(self, roomInfo):
 		if self._getroominfo() is None:
 			self._setroominfo(roomInfo)
-		else if self._getroominfo()[0] != roomInfo[0]:
+		elif self._getroominfo()[0] != roomInfo[0]:
 			self._setroominfo(roomInfo)
 		else:
 			print('room member list: duplicated info, do not update')
+	def isAfter(self, state):
+		return self._getstate() > state
+	def inRoom(self):
+		return self._getroomname() is not None
 #
 # This is the hash function for generating a unique
 # Hash ID for each peer.
@@ -169,33 +182,44 @@ def transition(currentState, action):
 	 		States['NAMED']: lambda x: FromNamed(x),
 	 		States['JOINED']: lambda x: FromJoined(x),
 	 		States['CONNECTED']: lambda x: FromConnected(x)}[currentState](action)
+
+#
+# functions for socket sending and receiving with block
+#
+def socketOperation(socket, sendData):
+	try:
+		socket.send(sendData.encode('ascii'))
+	except socket.error as errmsg:
+		print('socket sending error: ', errmsg)
+	try:
+		responseData = socket.recv(BUFSIZ)
+	except socket.error as errmsg:
+		print('socket receving error: ', errmsg)
+	return responseData.decode('ascii')
+
+
 #
 # functions for facilitation threads
-def keepAliveThread()
+#
+def keepAliveThread():
 	global currentState, user
+	print('keep alive thread start working ... ')
 	while True:
+		time.sleep(20)
 		userInfoLock.acquire()
 		clientsocket = user._getClientSocket()
 		message = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
-		requestMessage = 'J:' + message + PROTOCALEND
-		try:
-			requestSocket.send(requestMessage.encode('ascii'))
-		except socket.error as errmsg:
-			print('socket sending error: ', errmsg)
-		try:
-			responseData = requestSocket.recv(BUFSIZ)
-		except socket.error as errmsg:
-			print('socket receving error: ', errmsg)
-		responseMessage = responseData.decode('ascii')
+		requestMessage = 'J:' + message + PROTOCAL_END
+		responseMessage = socketOperation(clientsocket, requestMessage)
 		if (responseMessage[0] != 'M'):
 			CmdWin.insert(1.0, "\nFailed to join: roomserver error")
 			userInfoLock.release()
 			return
 		userInfoLock.release()
 		stateLock.acquire()
-		currentState.updateRoomInfo(responseMessage.replace(PROTOCALEND,'').split(':')[1:])
+		currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 		stateLock.release()
-		time.sleep(20)
+		print('Thread: keep alive action finish')
 
 #
 # Functions to handle user input
@@ -212,24 +236,30 @@ def do_User():
 	username = userentry.get()
 	# check if is joined.
 	stateLock.acquire()
-	if currentState >= States['JOINED']:
+	if currentState.isAfter(States['NAMED']):
 		CmdWin.insert(1.0, '\nFailed: ' + invalidMessage[1])
 		stateLock.release()
 		return
 	stateLock.release()
 	# change the username
 	userInfoLock.acquire()
+	flag = user.hasUserName()
 	if (user.setUserName(username) is Exceptions['INVALID_USERNAME']):
-		CmdWin.insert(1.0, '\nFailed: ' + invalidMessage[0])
+		CmdWin.insert(1.0, '\nFailed: ' + invalidMessage[0] +'\n')
 		userInfoLock.release()
 		return
 	userInfoLock.release()
 	# set state to named
 	stateLock.acquire()
-	currentState.transition(Actions['USER'])
+	currentState.stateTransition(Actions['USER'])
 	stateLock.release()
 	# clear the entry if success
 	userentry.delete(0, END)
+	# give some output in CmdWin
+	if flag:
+		CmdWin.insert(1.0, '\nSuccess: change name to '+username+' \n')
+	else:
+		CmdWin.insert(1.0, '\nSuccess: set your nickname as '+username+' \n')
 
 
 def do_User_Debug(username):
@@ -243,7 +273,7 @@ def do_User_Debug(username):
 	# username = userentry.get()
 	# check if is joined.
 	stateLock.acquire()
-	if currentState >= States['JOINED']:
+	if currentState.isAfter(States['JOINED']):
 		print('Failed: ' + invalidMessage[1])
 		stateLock.release()
 		return
@@ -257,7 +287,7 @@ def do_User_Debug(username):
 	userInfoLock.release()
 	# set state to named
 	stateLock.acquire()
-	currentState = transition(currentState, Actions['USER'])
+	currentState.stateTransition(Actions['USER'])
 	stateLock.release()
 	userentry.delete(0, END)
 
@@ -268,23 +298,16 @@ def do_List():
 
 	CmdWin.insert(1.0, "\nPress List")
 	userInfoLock.acquire()
-	requestSocket = user._getClientSocket()
-	requestMessage = 'L'+PROTOCALEND
-	try:
-		requestSocket.send(requestMessage.encode('ascii'))
-	except socket.error as errmsg:
-		print('socket sending error: ', errmsg)
-	try:
-		responseData = requestSocket.recv(BUFSIZ)
-	except socket.error as errmsg:
-		print('socket receving error: ', errmsg)
+	clientsocket = user._getClientSocket()
+	requestMessage = 'L' + PROTOCAL_END
+	print(requestMessage)
+	responseMessage = socketOperation(clientsocket, requestMessage)
 	userInfoLock.release()
-	responseMessage = responseData.decode('ascii')
-	presentMessage = '\n'.join(responseMessage.replace(PROTOCALEND,'').split(':')[1:])
+	presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 	CmdWin.insert(1.0, "\nHere are the active chatrooms:\n"+presentMessage+'\n')
 	# no need actually but stard
 	stateLock.acquire()
-	currentState = transition(currentState, Actions['LIST'])
+	currentState.stateTransition(Actions['LIST'])
 	stateLock.release()
 
 
@@ -294,24 +317,16 @@ def do_List_Debug():
 
 	CmdWin.insert(1.0, "\nPress List")
 	userInfoLock.acquire()
-	requestSocket = user._getClientSocket()
-	requestMessage = 'L' + PROTOCALEND
-	try:
-		requestSocket.send(requestMessage.encode('ascii'))
-	except socket.error as errmsg:
-		print('socket sending error: ', errmsg)
-	try:
-		responseData = requestSocket.recv(BUFSIZ)
-	except socket.error as errmsg:
-		print('socket receving error: ', errmsg)
+	clientsocket = user._getClientSocket()
+	requestMessage = 'L' + PROTOCAL_END
+	responseMessage = socketOperation(clientsocket, requestMessage)
 	userInfoLock.release()
-	responseMessage = responseData.decode('ascii')
-	presentMessage = '\n'.join(responseMessage.replace(PROTOCALEND,'').split(':')[1:])
+	presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 	print("\nHere are the active chatrooms:\n"+presentMessage+'\n')
 
 	# no need actually but stard
 	stateLock.acquire()
-	currentState = transition(currentState, Actions['LIST'])
+	currentState.stateTransition(Actions['LIST'])
 	stateLock.release()
 
 def do_Join():
@@ -321,10 +336,17 @@ def do_Join():
 	#check username
 	userInfoLock.acquire()
 	if not user.hasUserName():
-		CmdWin.insert(1.0, "\nError: Please input username first")
+		CmdWin.insert(1.0, "\nError: Please input username first!\n")
 		userInfoLock.release()
 		return
 	userInfoLock.release()
+	# check if it is already in a chatroom
+	stateLock.acquire()
+	if currentState.inRoom():
+		CmdWin.insert(1.0, "\nError: You are already in the chat room!\n")
+		stateLock.release()
+		return
+	stateLock.release()
 	# get and validate the name of chatroom
 	roomName = userentry.get()
 	if (re.match('^[\x00-\x7f]+$', roomName) is None) or (':' in roomName):
@@ -332,57 +354,45 @@ def do_Join():
 		return
 	# send request to roomserver
 	userInfoLock.acquire()
-	requestSocket = user._getClientSocket()
+	clientsocket = user._getClientSocket()
 	message = ':'.join([roomName, user._getname(), user._getip(), str(user._getport())])
-	requestMessage = 'J:' + message + PROTOCALEND
-	try:
-		requestSocket.send(requestMessage.encode('ascii'))
-	except socket.error as errmsg:
-		print('socket sending error: ', errmsg)
-	try:
-		responseData = requestSocket.recv(BUFSIZ)
-	except socket.error as errmsg:
-		print('socket receving error: ', errmsg)
+	requestMessage = 'J:' + message + PROTOCAL_END
+	responseMessage = socketOperation(clientsocket, requestMessage)
 	userInfoLock.release()
-	responseMessage = responseData.decode('ascii')
 	if (responseMessage[0] != 'M'):
 		CmdWin.insert(1.0, "\nFailed to join: roomserver error")
 		return
-	presentMessage = '\n'.join(responseMessage.replace(PROTOCALEND,'').split(':')[2::3])
+	presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[2::3])
 	CmdWin.insert(1.0, '\nJoin Success!\nHere are members in the room:\n' + presentMessage+ '\n' )
 	# change the state if success
 	stateLock.acquire()
-	currentState.updateRoomInfo(responseMessage.replace(PROTOCALEND,'').split(':')[1:])
+	currentState.updateRoomName(roomName)
+	currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 	currentState.stateTransition(Actions['JOIN'])
 	stateLock.release()
 	# clear the entry if success
 	userentry.delete(0, END)
+	# open the keep alive thread
+	keepAlive = threading.Thread(target=keepAliveThread, name='keepAlive')
+	keepAlive.start()
 
 def do_Join_Debug(roomName):
 	global currentState, user
 	# send request to roomserver
 	userInfoLock.acquire()
-	requestSocket = user._getClientSocket()
+	clientsocket = user._getClientSocket()
 	message = ':'.join([roomName, user._getname(), user._getip(), str(user._getport())])
-	requestMessage = 'J:' + message + PROTOCALEND
-	try:
-		requestSocket.send(requestMessage.encode('ascii'))
-	except socket.error as errmsg:
-		print('socket sending error: ', errmsg)
-	try:
-		responseData = requestSocket.recv(BUFSIZ)
-	except socket.error as errmsg:
-		print('socket receving error: ', errmsg)
+	requestMessage = 'J:' + message + PROTOCAL_END
+	responseMessage = socketOperation(clientsocket, requestMessage)
 	userInfoLock.release()
-	responseMessage = responseData.decode('ascii')
 	if (responseMessage[0] != 'M'):
 		print("\nFailed to join: roomserver error")
 		return
-	presentMessage = '\n'.join(responseMessage.replace(PROTOCALEND,'').split(':')[2::3])
+	presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[2::3])
 	print("\nJoin Success!\nHere are members in the room:\n" + presentMessage + '\n')
 	# change the state if success
 	stateLock.acquire()
-	currentState = transition(currentState, Actions['JOIN'])
+	currentState.stateTransition(Actions['JOIN'])
 	stateLock.release()
 	# clear the entry if success
 	userentry.delete(0, END)
@@ -392,6 +402,7 @@ def do_Send():
 
 def do_Quit():
 	CmdWin.insert(1.0, "\nPress Quit")
+	cleanUp()
 	sys.exit(0)
 
 def cleanUp():

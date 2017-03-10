@@ -37,7 +37,10 @@ Actions = {'USER' 	   : 5,
 		   'QUIT' 	   : 9,
 		   'HANDSHAKE' : 10} 
 
-Exceptions = {'INVALID_USERNAME' : 11}
+Exceptions = {'INVALID_USERNAME'           : 11,
+			  'SOCKET_ERROR'               : 12,
+			  'BACKWARDLINK_NOT_EXIST'     : 13,
+			  'BACKWARDLINK_ALREADY_EXIST' : 14}
 currentState = None
 user = None
 stateLock = threading.Lock()
@@ -108,10 +111,10 @@ class User():
 
 class State():
 	def __init__(self):
-		self._setstate(0)
+		self._setstate(States['STARTED'])
 		self._setroomname(None)
 		self._setroominfo(None)
-
+ 		self._linksetup()
 	def _setstate(self,state):
 		self._state = state
 	def _getstate(self):
@@ -124,6 +127,23 @@ class State():
 		self._roominfo = info
 	def _getroominfo(self):
 		return self._roominfo
+	def _linksetup(self):
+		self._backwardlinks = []
+		self._forwardlink = None
+	def _addbackwardlinks(self, hash):
+		if hash in self._backwardlinks:
+			return Exceptions['BACKWARDLINK_ALREADY_EXIST']
+		else:
+			self._backwardlinks.append(hash)
+			print('add new backward link with hash', hash)
+	def _removebackwardlinks(self, hash):
+		if hash not in self._backwardlinks:
+			return Exceptions['BACKWARDLINK_NOT_EXIST']
+		else:
+			self._backwardlinks.remove(hash)
+			print('remove backward link with hash', hash)
+	def _getbackwardlinks(self):
+		return self._backwardlinks
 	def stateTransition(self, action):
 		self._setstate(transition(self._getstate(),action))
 	def updateRoomName(self, roomName):
@@ -174,6 +194,7 @@ def FromJoined(action):
 def FromConnected(action):
 	return {Actions['LIST']: States['CONNECTED'],
 			Actions['SEND']: States['CONNECTED'],
+			Actions['HANDSHAKE']: States['CONNECTED'],
 			Actions['QUIT']: States['TERMINATED']}[action]
 
 # state transition function, critical, calling should be protected by logic
@@ -183,6 +204,15 @@ def transition(currentState, action):
 	 		States['JOINED']: lambda x: FromJoined(x),
 	 		States['CONNECTED']: lambda x: FromConnected(x)}[currentState](action)
 
+
+
+def findMyPosition(roomInfo, name, ip, port):
+	for i in range(1,len(roomInfo),3):
+		if name == roomInfo[i] and
+			ip == roomInfo[i+1] and 
+			port == roomInfo[i+2]:
+			return (i-1)/3
+	return None
 #
 # functions for socket sending and receiving with block
 #
@@ -191,10 +221,12 @@ def socketOperation(socket, sendData):
 		socket.send(sendData.encode('ascii'))
 	except socket.error as errmsg:
 		print('socket sending error: ', errmsg)
+		return Exceptions['SOCKET_ERROR']
 	try:
 		responseData = socket.recv(BUFSIZ)
 	except socket.error as errmsg:
 		print('socket receving error: ', errmsg)
+		return Exceptions['SOCKET_ERROR']
 	return responseData.decode('ascii')
 
 
@@ -220,6 +252,74 @@ def keepAliveThread():
 		currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 		stateLock.release()
 		print('Thread: keep alive action finish')
+
+def handShakeThread():
+	# get info of chatroom
+	global currentState, user
+	userInfoLock.acquire()
+	roomInfo = currentState._getroominfo()
+	backwardLinkHashList = currentState._getbackwardlinks()
+	userInfoLock.release()
+
+	# find myself position in the roomInfo
+	userInfoLock.acquire()
+	myName = user._getname()
+	myIp = user._getip()
+	myPort = user._getport()
+	userInfoLock.release()
+	myPosition = findMyPosition(roomInfo, myName, myIp, myPort)
+	# calculate hash of each user in the chatroom
+	hashList = map(lambda x: sdbm_hash(x), 
+				map(lambda x: reduce(lambda m, n: m+n, x),
+					[roomInfo[y:y+3] for y in range(1,len(roomInfo),3)]))
+	myHash = hashList[myPosition]
+	indexHashList = zip(range(len(hashList)), hashList)
+	start = sorted(test, key=lambda x : x[1]).index((myPosition, myHash)) + 1
+
+	# probe and connect
+	handShakeSocket = socket.socket()
+	successFlag = 0
+	while 1:
+		while indexHashList[start][0] != myPosition:
+			if indexHashList[start][1] in backwardLinkHashList:
+				print('try with one connection but find it already in backward list, try another')
+				start = (start + 1) % len(indexHashList)
+				continue
+			else:
+				realIndex = indexHashList[start][0]
+				try:
+					handShakeSocket.connect((roomInfo[realIndex+1], int(roomInfo[realIndex+2])))
+				except socket.error as errmsg:
+					print('try to connect with[', roomInfo[realIndex+1],
+						',',roomInfo[realIndex+2],
+						']but failed, try another')
+					start = (start + 1) % len(indexHashList)
+					continue
+				
+				try:
+					#### TODO run peer to peer handshake
+
+					print('successfully connect with a peer through peer-to-peer handshake with [',
+						roomInfo[realIndex+1], ',',roomInfo[realIndex+2],']')
+
+					#### TODO update the state
+
+					successFlag = 1
+					break
+					pass
+				except:
+					print('try peer-to-peer handshake with [', roomInfo[realIndex+1],
+						',',roomInfo[realIndex+2],
+						']but failed, try another')
+					start = (start + 1) % len(indexHashList)
+					continue
+		if successFlag == 1:
+			break
+		else:
+			print('failed to find a forward link with one loop, do it again 20seconds later')
+			time.sleep(20)
+
+
 
 #
 # Functions to handle user input

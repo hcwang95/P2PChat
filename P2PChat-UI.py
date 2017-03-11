@@ -253,10 +253,14 @@ def keepAliveThread():
 		stateLock.release()
 		print('Thread: keep alive action finish')
 
+
+
+
 def handShakeThread():
 	# get info of chatroom
 	global currentState, user
 	userInfoLock.acquire()
+	roomName = currentState._getroomname()
 	roomInfo = currentState._getroominfo()
 	backwardLinkHashList = currentState._getbackwardlinks()
 	userInfoLock.release()
@@ -298,7 +302,9 @@ def handShakeThread():
 				
 				try:
 					#### TODO run peer to peer handshake
-
+					####### issue how to set msgID
+					message = ":".join([roomName,myName,myIp,myPort,msgID])
+					requestMessage = 'P:' + message + PROTOCAL_END
 					print('successfully connect with a peer through peer-to-peer handshake with [',
 						roomInfo[realIndex+1], ',',roomInfo[realIndex+2],']')
 
@@ -316,7 +322,7 @@ def handShakeThread():
 		if successFlag == 1:
 			break
 		else:
-			print('failed to find a forward link with one loop, do it again 20seconds later')
+			print('failed to find a forward link with one loop, do it again 20 seconds later')
 			time.sleep(20)
 
 

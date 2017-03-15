@@ -11,8 +11,10 @@ from tkinter import *
 import sys
 import socket
 import re
-import threading
-import time
+from threading import Thread, Lock
+from time import sleep
+from functools import reduce
+from select import select
 
 
 #
@@ -29,7 +31,6 @@ States = {'STARTED'    : 0,
 		  'CONNECTED'  : 3,
 		  'TERMINATED' : 4 }
 
-
 Actions = {'USER' 	   : 5,
 		   'LIST' 	   : 6,
 		   'JOIN' 	   : 7,
@@ -40,12 +41,15 @@ Actions = {'USER' 	   : 5,
 Exceptions = {'INVALID_USERNAME'           : 11,
 			  'SOCKET_ERROR'               : 12,
 			  'BACKWARDLINK_NOT_EXIST'     : 13,
-			  'BACKWARDLINK_ALREADY_EXIST' : 14}
+			  'BACKWARDLINK_ALREADY_EXIST' : 14,
+			  'TIMEOUT'                    : 15}
+
+# two core global variables
 currentState = None
 user = None
 # two lock for maintaining user info and current state info
-stateLock = threading.Lock()
-userInfoLock = threading.Lock()
+stateLock = Lock()
+userInfoLock = Lock()
 
 # user class
 # maintaining user program basic info
@@ -70,7 +74,7 @@ class User():
 		print("setting up user socket...")
 		if (serverIP is not None and serverPort is not None):
 			self._clientSocket = socket.socket()
-			# connect with room server with clientsocket
+			# connect with room server with clientSocket
 			try:
 				self._clientSocket.connect((serverIP, serverPort))
 				print('finish setting user socket: connected to roomserver[',
@@ -136,6 +140,9 @@ class User():
 		if (self.validation.match(username) is None) or (':' in username):
 			return Exceptions['INVALID_USERNAME']
 		self._setname(username)
+	def bindServerSocket(self):
+		self._socketSetup(serverIP = None, serverPort = None,
+							localIP = self._getip(), localPort = self._getport())
 
 
 # state class
@@ -152,6 +159,7 @@ class State():
 		self._setstate(States['STARTED'])
 		self._setroomname(None)
 		self._setroominfo(None)
+		self._setmsgid(0)
 		self._linksetup()
 	def _setstate(self,state):
 		self._state = state
@@ -162,12 +170,23 @@ class State():
 	def _getroomname(self):
 		return self._roomname
 	def _setroominfo(self,info):
+		print('setting room info')
+		print('info is ', info)
 		self._roominfo = info
+		print('after setting, roominfo is', self._roominfo)
 	def _getroominfo(self):
 		return self._roominfo
+	def _setforwardlink(self, forwardLink):
+		self._forwardlink = forwardLink
 	def _linksetup(self):
 		self._backwardlinks = []
-		self._forwardlink = None
+		self._setforwardlink(None)
+	def _setmsgid(self, msgID):
+		self._msgid = msgID
+	def _getmsgid(self):
+		return self._msgid
+	def _getforwardlink(self):
+		return self._forwardlink
 	def _addbackwardlinks(self, hash):
 		if hash in self._backwardlinks:
 			return Exceptions['BACKWARDLINK_ALREADY_EXIST']
@@ -244,18 +263,20 @@ def transition(currentState, action):
 
 
 # facilitation function for handshake process in stage 2
-def findMyPosition(roomInfo, name, ip, port):
+def findPosition(roomInfo, name, ip, port):
+	print (roomInfo)
 	for i in range(1,len(roomInfo),3):
-		if name == roomInfo[i] and ip == roomInfo[i+1] and port == roomInfo[i+2]:
-			return (i-1)/3
+		print(roomInfo[i], roomInfo[i+1], roomInfo[i+2])
+		if name == roomInfo[i] and ip == roomInfo[i+1] and port == int(roomInfo[i+2]):
+			return int((i-1)/3)
 	return None
 #
 # functions for socket sending and receiving with block
 # similar to C and C++ marco just for reducing duplication
 #
-def socketOperation(socket, sendData):
+def socketOperation(socket, sendMessage):
 	try:
-		socket.send(sendData.encode('ascii'))
+		socket.send(sendMessage.encode('ascii'))
 	except socket.error as errmsg:
 		print('socket sending error: ', errmsg)
 		return Exceptions['SOCKET_ERROR']
@@ -266,7 +287,29 @@ def socketOperation(socket, sendData):
 		return Exceptions['SOCKET_ERROR']
 	return responseData.decode('ascii')
 
-
+#
+# functions for blocking socket to send and recv message
+# with timeout option, return Exception['TIMEOUT'] if timeout
+# para: timeout - seconds 
+#
+def socketOperationTimeout(socket, sendMessage, timeout):
+	readList = [socket]
+	try:
+		socket.send(sendMessage.encode('ascii'))
+	except socket.error as errmsg:
+		print('socket sending error: ', errmsg)
+		return Exceptions['SOCKET_ERROR']
+	available = select(readList, [], [], timeout)
+	if available:
+		sockfd = readList[0]
+		try:
+			responseData = sockfd.recv(BUFSIZ)
+			return responseData.decode('ascii')
+		except socket.error as errmsg:
+			print('socket receving error: ', errmsg)
+			return Exceptions['SOCKET_ERROR']
+	else:
+		return Exceptions['TIMEOUT']
 #
 # functions for facilitation threads of keep alive procedure
 # resend 'JOIN' request ever 20 seconds after successfully joining
@@ -275,12 +318,12 @@ def keepAliveThread():
 	global currentState, user
 	print('keep alive thread start working ... ')
 	while True:
-		time.sleep(20)
+		sleep(20)
 		userInfoLock.acquire()
-		clientsocket = user._getClientSocket()
+		clientSocket = user._getClientSocket()
 		message = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
 		requestMessage = 'J:' + message + PROTOCAL_END
-		responseMessage = socketOperation(clientsocket, requestMessage)
+		responseMessage = socketOperation(clientSocket, requestMessage)
 		if (responseMessage[0] != 'M'):
 			CmdWin.insert(1.0, "\nFailed to join: roomserver error")
 			userInfoLock.release()
@@ -303,6 +346,7 @@ def handShakeThread():
 	userInfoLock.acquire()
 	roomName = currentState._getroomname()
 	roomInfo = currentState._getroominfo()
+	msgID = currentState._getmsgid()
 	backwardLinkHashList = currentState._getbackwardlinks()
 	userInfoLock.release()
 
@@ -312,60 +356,154 @@ def handShakeThread():
 	myIp = user._getip()
 	myPort = user._getport()
 	userInfoLock.release()
-	myPosition = findMyPosition(roomInfo, myName, myIp, myPort)
+	myPosition = findPosition(roomInfo, myName, myIp, myPort)
 	# calculate hash of each user in the chatroom
-	hashList = map(lambda x: sdbm_hash(x), 
-				map(lambda x: reduce(lambda m, n: m+n, x),
-					[roomInfo[y:y+3] for y in range(1,len(roomInfo),3)]))
+	hashList = list(map(lambda x: sdbm_hash(x), 
+						map(lambda x: reduce(lambda m, n: m+n, x),
+							[roomInfo[y:y+3] for y in range(1,len(roomInfo),3)])))
 	myHash = hashList[myPosition]
 	indexHashList = zip(range(len(hashList)), hashList)
-	start = sorted(test, key=lambda x : x[1]).index((myPosition, myHash)) + 1
-
+	gList = sorted(indexHashList, key=lambda x : x[1])
+	print('gList',gList)
+	start = (gList.index((myPosition, myHash)) + 1) % len(gList)
+	print('start',start)
 	# probe and connect
 	handShakeSocket = socket.socket()
 	successFlag = 0
+	startListen = 0
 	while 1:
-		while indexHashList[start][0] != myPosition:
-			if indexHashList[start][1] in backwardLinkHashList:
-				print('try with one connection but find it already in backward list, try another')
-				start = (start + 1) % len(indexHashList)
+		while gList[start][0] != myPosition:
+			if gList[start][1] in backwardLinkHashList:
+				print('HandShake: try with one connection but find it already in backward list, try another')
+				start = (start + 1) % len(gList)
 				continue
 			else:
-				realIndex = indexHashList[start][0]
+				# try to approach by connecting
+				realIndex = gList[start][0]
 				try:
 					handShakeSocket.connect((roomInfo[realIndex+1], int(roomInfo[realIndex+2])))
 				except socket.error as errmsg:
-					print('try to connect with[', roomInfo[realIndex+1],
+					print('HandShake: try to connect with[', roomInfo[realIndex+1],
 						',',roomInfo[realIndex+2],
 						']but failed, try another')
-					start = (start + 1) % len(indexHashList)
+					start = (start + 1) % len(gList)
+					handShakeSocket = socket.socket()
 					continue
 				
-				try:
-					#### TODO run peer to peer handshake
-					####### issue how to set msgID
-					message = ":".join([roomName,myName,myIp,myPort,msgID])
-					requestMessage = 'P:' + message + PROTOCAL_END
-					print('successfully connect with a peer through peer-to-peer handshake with [',
-						roomInfo[realIndex+1], ',',roomInfo[realIndex+2],']')
-
-					#### TODO update the state
-
-					successFlag = 1
-					break
-					pass
-				except:
-					print('try peer-to-peer handshake with [', roomInfo[realIndex+1],
-						',',roomInfo[realIndex+2],
-						']but failed, try another')
-					start = (start + 1) % len(indexHashList)
+				#### run peer to peer handshake
+				message = ":".join([roomName,myName,myIp,str(myPort),str(msgID)])
+				requestMessage = 'P:' + message + PROTOCAL_END
+				### issue: what if there is no response?
+				responseMessage = socketOperationTimeout(handShakeSocket, requestMessage,1)
+				if responseMessage is Exceptions['TIMEOUT']:
+					print("HandShake: timeout, try another socket")
+					handShakeSocket = socket.socket()
+					start = (start + 1) % len(gList)
 					continue
+				if responseMessage is Exceptions['SOCKET_ERROR']:
+					print('HandShake: try peer-to-peer handshake with [', roomInfo[realIndex+1],
+						',',roomInfo[realIndex+2],
+						'] but failed, try another')
+					start = (start + 1) % len(gList)
+					continue
+				print('HandShake: successfully connect with a peer through peer-to-peer handshake with',
+					roomInfo[realIndex])
+				successFlag = 1
+				break
+					
+					
+		if not startListen:
+			userInfoLock.acquire()
+			user.bindServerSocket()
+			userInfoLock.release()
+			startListen = 1
 		if successFlag == 1:
+			stateLock.acquire()
+			currentState.stateTransition(Actions['HANDSHAKE'])
+			currentState._setforwardlink(handShakeSocket)
+			stateLock.release()
 			break
 		else:
-			print('failed to find a forward link with one loop, do it again 20 seconds later')
-			time.sleep(20)
+			print('HandShake: failed to find a forward link with one loop, do it again 20 seconds later')
+			sleep(20)
 
+def serverSocketThread():
+	global user, currentState
+	userInfoLock.acquire()
+	serverSocket = user._getServerSocket()
+	clientSocket = user._getClientSocket()
+	userInfoLock.release()
+	stateLock.acquire()
+	forwardLinkSocket = currentState._getforwardlink()
+	stateLock.release()
+	readList = [serverSocket]
+	if (forwardLinkSocket):
+		readList.append(forwardLinkSocket)
+	while 1:
+		availableSockets = select(readList,[],[],20)
+		if availableSockets:
+			for sockfd in availableSockets:
+				# 
+				if sockfd is serverSocket:
+					backwardLink, address = serverSocket.accept()
+					requestData = backwardLink.recv(BUFSIZ)
+					requestMessage = requestData.decode('ascii')
+					# validate message
+					pattern = "^P:[^:]+:(\d+\.){3}\d+:\d+::\r\n$"
+					if (re.match(pattern, requestMessage) is None):
+						print('Server Thread: receive a invlid request', requestMessage)
+						print('Server Thread: refuse that request by ignoring it')
+						backwardLink.close()
+						continue
+					# check if there exist in the room info
+					message = requestMessage.replace(PROTOCAL_END, '').split(':')[1]
+					backLinkUserName = message[0]
+					backwardLinkIp = message[1]
+					backwardLinkPort = int(message[2])
+					stateLock.acquire()
+					roomInfo = currentState._getroominfo()
+					stateLock.release()
+					if (findPosition(roomInfo, backLinkUserName, backwardLinkIp, backwardLinkPort) is None):
+						print('Server Thread: finding that there is no info of newly backward link, update roominfo and check again')
+						stateLock.acquire()
+						message_ = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
+						requestMessage = 'J:' + message_ + PROTOCAL_END
+						responseMessage = socketOperation(clientSocket, requestMessage)
+						if (responseMessage[0] != 'M'):
+							print("Server Thread: Failed to join: roomserver error, try again")
+							responseMessage = socketOperation(clientSocket, requestMessage)
+							if (responseMessage[0] != 'M'):
+								print("Server Thread: Failed to join: roomserver error, discard current action")
+								backwardLink.close()
+								stateLock.release()
+								continue
+						currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
+						roomInfo = currentState._getroominfo()
+						stateLock.release()
+						print('Server Thread: Joined finish and check the info again')
+					if (findPosition(roomInfo, backLinkUserName, backwardLinkIp, backwardLinkPort) is None):
+						print('Server Thread: No info for the newly coming backward link')
+						print('Server Thread: refuse that request by ignoring it')
+						backwardLink.close()
+						continue
+					else:
+						print('Server Thread: match the info of newly coming backward link')
+						print('Server Thread: establish connection ...')
+						# establish connection with that socket
+						stateLock.acquire()
+						currentState._addbackwardlinks(backwardLink)
+						msgID = currentState._getmsgid()
+						responseMessage = "S:" + str(msgID) + "::\r\n"
+						# state transition if neccessary
+						currentState.stateTransition(Actions['HANDSHAKE'])
+						stateLock.release()
+						# update readlist
+						readList.append(backwardLink)
+					print('find one backward link')
+				else:
+					# TODO: handling typical send message from other peers
+		else:
+			print ("Server Thread: idling")
 
 
 #
@@ -449,10 +587,10 @@ def do_List():
 
 	CmdWin.insert(1.0, "\nPress List")
 	userInfoLock.acquire()
-	clientsocket = user._getClientSocket()
+	clientSocket = user._getClientSocket()
 	requestMessage = 'L' + PROTOCAL_END
 	print(requestMessage)
-	responseMessage = socketOperation(clientsocket, requestMessage)
+	responseMessage = socketOperation(clientSocket, requestMessage)
 	userInfoLock.release()
 	presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 	CmdWin.insert(1.0, "\nHere are the active chatrooms:\n"+presentMessage+'\n')
@@ -469,9 +607,9 @@ def do_List_Debug():
 
 	CmdWin.insert(1.0, "\nPress List")
 	userInfoLock.acquire()
-	clientsocket = user._getClientSocket()
+	clientSocket = user._getClientSocket()
 	requestMessage = 'L' + PROTOCAL_END
-	responseMessage = socketOperation(clientsocket, requestMessage)
+	responseMessage = socketOperation(clientSocket, requestMessage)
 	userInfoLock.release()
 	presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 	print("\nHere are the active chatrooms:\n"+presentMessage+'\n')
@@ -509,10 +647,10 @@ def do_Join():
 		return
 	# send request to roomserver
 	userInfoLock.acquire()
-	clientsocket = user._getClientSocket()
+	clientSocket = user._getClientSocket()
 	message = ':'.join([roomName, user._getname(), user._getip(), str(user._getport())])
 	requestMessage = 'J:' + message + PROTOCAL_END
-	responseMessage = socketOperation(clientsocket, requestMessage)
+	responseMessage = socketOperation(clientSocket, requestMessage)
 	userInfoLock.release()
 	if (responseMessage[0] != 'M'):
 		CmdWin.insert(1.0, "\nFailed to join: roomserver error")
@@ -529,18 +667,20 @@ def do_Join():
 	# clear the entry if success
 	userentry.delete(0, END)
 	# open the keep alive thread
-	keepAlive = threading.Thread(target=keepAliveThread, name='keepAlive')
+	keepAlive = Thread(target=keepAliveThread, name='keepAlive')
 	keepAlive.start()
-
+	# open the handshake thread
+	handShake = Thread(target=handShakeThread, name='handShake')
+	handShake.start()
 # function for debuging in the command line
 def do_Join_Debug(roomName):
 	global currentState, user
 	# send request to roomserver
 	userInfoLock.acquire()
-	clientsocket = user._getClientSocket()
+	clientSocket = user._getClientSocket()
 	message = ':'.join([roomName, user._getname(), user._getip(), str(user._getport())])
 	requestMessage = 'J:' + message + PROTOCAL_END
-	responseMessage = socketOperation(clientsocket, requestMessage)
+	responseMessage = socketOperation(clientSocket, requestMessage)
 	userInfoLock.release()
 	if (responseMessage[0] != 'M'):
 		print("\nFailed to join: roomserver error")
@@ -549,10 +689,19 @@ def do_Join_Debug(roomName):
 	print("\nJoin Success!\nHere are members in the room:\n" + presentMessage + '\n')
 	# change the state if success
 	stateLock.acquire()
-	currentState.stateTransition(Actions['JOIN'])
+	currentState.stateTransition(Actions['JOIN'])	
+	currentState.updateRoomName(roomName)
+	currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 	stateLock.release()
+
 	# clear the entry if success
 	userentry.delete(0, END)
+	# open the keep alive thread
+	keepAlive = Thread(target=keepAliveThread, name='keepAlive')
+	keepAlive.start()
+	# open the handshake thread
+	handShake = Thread(target=handShakeThread, name='handShake')
+	handShake.start()
 
 def do_Send():
 	CmdWin.insert(1.0, "\nPress Send")
@@ -618,7 +767,10 @@ def main():
 	global currentState, user
 	currentState = State()
 	user = User(sys.argv[1], int(sys.argv[2]), socket.gethostbyname(socket.gethostname()),int(sys.argv[3]))
-	win.mainloop()
+	# win.mainloop()
+	do_User_Debug('abc')
+	do_List_Debug()
+	do_Join_Debug('aaaaa')
 
 if __name__ == "__main__":
 	main()

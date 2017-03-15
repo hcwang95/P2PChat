@@ -43,9 +43,18 @@ Exceptions = {'INVALID_USERNAME'           : 11,
 			  'BACKWARDLINK_ALREADY_EXIST' : 14}
 currentState = None
 user = None
+# two lock for maintaining user info and current state info
 stateLock = threading.Lock()
 userInfoLock = threading.Lock()
 
+# user class
+# maintaining user program basic info
+# include:
+# 1. roomserver ipv4 address and port
+# 2. p2pclient listening port
+# 3. user socket connecting to roomserver and
+#    and socket as local server socket
+# 4. username validation rules
 class User():
 	def __init__(self , serverIP, serverPort, 
 					localIP , localPort):
@@ -56,7 +65,7 @@ class User():
 		self._serverSocket = None
 		## here we define the username validation rule
 		self.validation = re.compile("^[\x00-\x7F]+$")
-		self._socketSetup(serverIP, serverPort, localIP, localPort)
+		self._socketSetup(serverIP, serverPort)
 	def _socketSetup(self, serverIP=None, serverPort=None, localIP=None, localPort=None):
 		print("setting up user socket...")
 		if (serverIP is not None and serverPort is not None):
@@ -64,24 +73,43 @@ class User():
 			# connect with room server with clientsocket
 			try:
 				self._clientSocket.connect((serverIP, serverPort))
+				print('finish setting user socket: connected to roomserver[',
+					serverIP,',',serverPort,']')	
 			except socket.error as errmsg:
 				print('Failed to connect to roomServer: ', errmsg)
-				self._clientSocket.close()
-			print('finish setting user socket: connected to roomserver[',
-				serverIP,',',serverPort,']')
-		if (localPort is not None)
+				print('try again')
+
+				try:
+					self._clientSocket.connect((serverIP, serverPort))
+					print('finish setting user socket: connected to roomserver[',
+						serverIP,',',serverPort,']')
+				except:
+					print('Failed to connect to roomServer again: ', errmsg)
+					print("""p2pclient program shutdowns due to failure to connect to roomserver,
+							please check if the server address and port are correct, or check if 
+							the server is already working""")
+					self._clientSocket.close()
+					sys.exit(1)
+			
+		if (localPort is not None):
 			self._serverSocket = socket.socket()
 			try:
-				self._clientSocket.connect((serverIP, serverPort))
-			except socket.error as errmsg:
-				print('Failed to connect to roomServer: ', errmsg)
-				self._clientSocket.close()
-			try:
 				self._serverSocket.bind((localIP,localPort))
+				print('finish setting user socket: open server port:', localPort)
 			except socket.error as emsg:
 				print("Socket bind error: ", emsg)
-				self._serverSocket.close()
-			print('finish setting user socket: open server port:', localPort)
+				print("try again")
+				try:
+					elf._serverSocket.bind((localIP,localPort))
+					print('finish setting user socket: open server port:', localPort)
+				except socket.error as emsg:
+					print("Socket bind error again: ", emsg)
+					print("""p2pclient program shutdowns due to failure to bind the listening socket
+							, please check your socket usage and try another available port""")
+					self._serverSocket.close()
+					sys.exit(1)
+		else:
+			print('Ignore binding port for the time being')
 	# def resumeConnectionToServer(self):
 	# 	print('conduct resuming process')
 	# 	self._socketSetup(self._getip)
@@ -109,12 +137,22 @@ class User():
 			return Exceptions['INVALID_USERNAME']
 		self._setname(username)
 
+
+# state class
+# containing current state info
+# include:
+# 1. current room name (default None)
+# 2. current room info (a list [MSID, userAName, userAIp, userAPort,
+# 								userBName, userBIp, userBPort,...])
+# 3. forward Links(for stage 2)
+# 4. backward Links List (for stage 2)
+# 5. msgID (TODO: for stage 2)
 class State():
 	def __init__(self):
 		self._setstate(States['STARTED'])
 		self._setroomname(None)
 		self._setroominfo(None)
- 		self._linksetup()
+		self._linksetup()
 	def _setstate(self,state):
 		self._state = state
 	def _getstate(self):
@@ -205,16 +243,15 @@ def transition(currentState, action):
 	 		States['CONNECTED']: lambda x: FromConnected(x)}[currentState](action)
 
 
-
+# facilitation function for handshake process in stage 2
 def findMyPosition(roomInfo, name, ip, port):
 	for i in range(1,len(roomInfo),3):
-		if name == roomInfo[i] and
-			ip == roomInfo[i+1] and 
-			port == roomInfo[i+2]:
+		if name == roomInfo[i] and ip == roomInfo[i+1] and port == roomInfo[i+2]:
 			return (i-1)/3
 	return None
 #
 # functions for socket sending and receiving with block
+# similar to C and C++ marco just for reducing duplication
 #
 def socketOperation(socket, sendData):
 	try:
@@ -231,7 +268,8 @@ def socketOperation(socket, sendData):
 
 
 #
-# functions for facilitation threads
+# functions for facilitation threads of keep alive procedure
+# resend 'JOIN' request ever 20 seconds after successfully joining
 #
 def keepAliveThread():
 	global currentState, user
@@ -255,7 +293,10 @@ def keepAliveThread():
 
 
 
-
+#
+# TODO: thread for handshake procedure
+# follow the logic of spec
+#
 def handShakeThread():
 	# get info of chatroom
 	global currentState, user
@@ -343,7 +384,8 @@ def do_User():
 	# check if is joined.
 	stateLock.acquire()
 	if currentState.isAfter(States['NAMED']):
-		CmdWin.insert(1.0, '\nFailed: ' + invalidMessage[1])
+		CmdWin.insert(1.0, '\nFailed: ' + invalidMessage[1] + '\n')
+		print('\nFailed: ' + invalidMessage[1])
 		stateLock.release()
 		return
 	stateLock.release()
@@ -352,6 +394,7 @@ def do_User():
 	flag = user.hasUserName()
 	if (user.setUserName(username) is Exceptions['INVALID_USERNAME']):
 		CmdWin.insert(1.0, '\nFailed: ' + invalidMessage[0] +'\n')
+		print('\nFailed: ' + invalidMessage[0])
 		userInfoLock.release()
 		return
 	userInfoLock.release()
@@ -364,10 +407,12 @@ def do_User():
 	# give some output in CmdWin
 	if flag:
 		CmdWin.insert(1.0, '\nSuccess: change name to '+username+' \n')
+		print('\nSuccess: change name to '+username+' \n')
 	else:
 		CmdWin.insert(1.0, '\nSuccess: set your nickname as '+username+' \n')
+		print('\nSuccess: set your nickname as '+username+' \n')
 
-
+# function for debuging in the command line
 def do_User_Debug(username):
 
 	global currentState, user
@@ -411,12 +456,13 @@ def do_List():
 	userInfoLock.release()
 	presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 	CmdWin.insert(1.0, "\nHere are the active chatrooms:\n"+presentMessage+'\n')
-	# no need actually but stard
+	print("\nHere are the active chatrooms:\n"+presentMessage)
+	# no need actually but standard for state transition procedure
 	stateLock.acquire()
 	currentState.stateTransition(Actions['LIST'])
 	stateLock.release()
 
-
+# function for debuging in the command line
 def do_List_Debug():
 
 	global user, currentState
@@ -443,6 +489,7 @@ def do_Join():
 	userInfoLock.acquire()
 	if not user.hasUserName():
 		CmdWin.insert(1.0, "\nError: Please input username first!\n")
+		print("\nError: Please input username first!\n")
 		userInfoLock.release()
 		return
 	userInfoLock.release()
@@ -450,6 +497,7 @@ def do_Join():
 	stateLock.acquire()
 	if currentState.inRoom():
 		CmdWin.insert(1.0, "\nError: You are already in the chat room!\n")
+		print("\nError: You are already in the chat room!\n")
 		stateLock.release()
 		return
 	stateLock.release()
@@ -457,6 +505,7 @@ def do_Join():
 	roomName = userentry.get()
 	if (re.match('^[\x00-\x7f]+$', roomName) is None) or (':' in roomName):
 		CmdWin.insert(1.0, "\nFailed: invalid room name")
+		print("\nFailed: invalid room name")
 		return
 	# send request to roomserver
 	userInfoLock.acquire()
@@ -470,6 +519,7 @@ def do_Join():
 		return
 	presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[2::3])
 	CmdWin.insert(1.0, '\nJoin Success!\nHere are members in the room:\n' + presentMessage+ '\n' )
+	print('\nJoin Success!\nHere are members in the room:\n' + presentMessage)
 	# change the state if success
 	stateLock.acquire()
 	currentState.updateRoomName(roomName)
@@ -482,6 +532,7 @@ def do_Join():
 	keepAlive = threading.Thread(target=keepAliveThread, name='keepAlive')
 	keepAlive.start()
 
+# function for debuging in the command line
 def do_Join_Debug(roomName):
 	global currentState, user
 	# send request to roomserver
@@ -502,15 +553,16 @@ def do_Join_Debug(roomName):
 	stateLock.release()
 	# clear the entry if success
 	userentry.delete(0, END)
+
 def do_Send():
 	CmdWin.insert(1.0, "\nPress Send")
-
 
 def do_Quit():
 	CmdWin.insert(1.0, "\nPress Quit")
 	cleanUp()
 	sys.exit(0)
 
+# TODO clean up procedure to close all socket fds
 def cleanUp():
 	pass
 #
@@ -567,21 +619,6 @@ def main():
 	currentState = State()
 	user = User(sys.argv[1], int(sys.argv[2]), socket.gethostbyname(socket.gethostname()),int(sys.argv[3]))
 	win.mainloop()
-	# do_User_Debug('abcasdfasdf`0123')
-	# do_User_Debug('abcasdff`0123')
-	# do_User_Debug('abcasdfasasdfdf`0123')
-	# do_User_Debug('abca23')
-	# do_User_Debug('')
-	# do_User_Debug('abcas:dfasdf`0123')
-	# do_User_Debug('hcwang')
-
-	# do_List_Debug()
-	# do_Join_Debug('testing1')
-	# do_List_Debug()
-
-
-	# print('username:' + user._getname())
-	cleanUp()
 
 if __name__ == "__main__":
 	main()

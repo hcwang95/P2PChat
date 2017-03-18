@@ -178,10 +178,7 @@ class State():
 	def _getroominfo(self):
 		return self._roominfo
 	def _setforwardlink(self, forwardLink):
-		if forwardLink is None:
 			self._forwardlink = forwardLink
-		else:
-			print("Error: cannot set forward link second time")
 	def _linksetup(self):
 		self._backwardlinks = []
 		self._setforwardlink(None)
@@ -191,12 +188,12 @@ class State():
 		return self._msgid
 	def _getforwardlink(self):
 		return self._forwardlink
-	def _addbackwardlinks(self, hash):
+	def _addbackwardlinks(self, tuple):
 		if hash in self._backwardlinks:
 			return Exceptions['BACKWARDLINK_ALREADY_EXIST']
 		else:
-			self._backwardlinks.append(hash)
-			print('add new backward link with hash', hash)
+			self._backwardlinks.append(tuple)
+			print('add new backward link with hash', tuple[0])
 	def _removebackwardlinks(self, hash):
 		if hash not in self._backwardlinks:
 			return Exceptions['BACKWARDLINK_NOT_EXIST']
@@ -369,11 +366,6 @@ def handShakeThread():
 		roomName = currentState._getroomname()
 		roomInfo = currentState._getroominfo()
 		msgID = currentState._getmsgid()
-
-
-		backwardLinkHashList = currentState._getbackwardlinks()
-
-
 		stateLock.release()
 		myPosition = findPosition(roomInfo, myName, myIp, myPort)
 		# print("myposition," , myPosition)
@@ -388,7 +380,11 @@ def handShakeThread():
 		# probe and connect
 		handShakeSocket = socket.socket()
 		while gList[start][0] != myPosition:
-			print('HandShake: approach user',roomInfo[1+3*start:4+3*start])
+			print('HandShake: approach user',roomInfo[1+3*gList[start][0]:4+3*gList[start][0]])
+			stateLock.acquire()
+			backwardLinkTupleList = currentState._getbackwardlinks()
+			backwardLinkHashList = [i[0] for i in backwardLinkTupleList]
+			stateLock.release()
 			if gList[start][1] in backwardLinkHashList:
 				print('HandShake: try with one connection but find it already in backward list, try another')
 				start = (start + 1) % len(gList)
@@ -430,7 +426,6 @@ def handShakeThread():
 					message = responseMessage.replace(PROTOCAL_END, '').split(':')[1:]
 					stateLock.acquire()
 					currentState.updateMsgID(int(message[0]))
-					currentState._setforwardlink(handShakeSocket)
 					stateLock.release()
 					successFlag = 1
 				break
@@ -453,6 +448,7 @@ def handShakeThread():
 			print('HandShake: failed to find a forward link with one loop, do it again', PROTOCAL_TIME,'seconds later')
 			print('startListen', startListen)
 			sleep(PROTOCAL_TIME)
+	print('HandShake: finish work and shutdown ... ')
 
 def serverSocketThread():
 	global user, currentState
@@ -532,7 +528,8 @@ def serverSocketThread():
 						print('Server Thread: establish connection ...')
 						# establish connection with that socket
 						stateLock.acquire()
-						currentState._addbackwardlinks(backwardLink)
+						backwardLinkTuple = (sdbm_hash(backwardLinkUserName+backwardLinkIp+str(backwardLinkPort)),backwardLink)
+						currentState._addbackwardlinks(backwardLinkTuple)
 						msgID = currentState._getmsgid()
 						responseMessage = "S:" + str(msgID) + "::\r\n"
 						output = socketOperation(backwardLink, responseMessage, receive = False)
@@ -814,7 +811,8 @@ def do_Send():
 	# check for all back and forward link
 	stateLock.acquire()
 	forwardLink = currentState._getforwardlink()
-	backwardLinks = currentState._getbackwardlinks()
+	backwardLinkTupleList = currentState._getbackwardlinks()
+	backwardLinks = [i[1] for i in backwardLinkTupleList]
 	stateLock.release()
 	sendingList = []
 	if not forwardLink is None:
@@ -833,7 +831,7 @@ def do_Send():
 	userInfoLock.release()
 
 	# construct the protocal message
-	originHID = sdbm_hash(username+userIp+str(userPort))
+	originHID = sdbm_hash(userName+userIp+str(userPort))
 	message = [roomName, str(originHID), userName, str(msgID), str(len(inputData)), inputData]
 	requestMessage = 'T:' + ':'.join(message) + PROTOCAL_END
 	for socket in sendingList:
@@ -841,6 +839,7 @@ def do_Send():
 		if output == Exceptions['SOCKET_ERROR']:
 			print('Send Error: cannot sent the message to', socket.getsockname())
 	MsgWin.insert(1.0, '\n['+userName+']: '+inputData)
+
 
 
 def do_Quit():

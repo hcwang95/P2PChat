@@ -44,7 +44,10 @@ Exceptions = {'INVALID_USERNAME'           : 11,
 			  'SOCKET_ERROR'               : 12,
 			  'BACKWARDLINK_NOT_EXIST'     : 13,
 			  'BACKWARDLINK_ALREADY_EXIST' : 14,
-			  'TIMEOUT'                    : 15}
+			  'TIMEOUT'                    : 15,
+			  'ROOMSERVERE_ERROR'          : 16,
+			  'SOCKET_BIND_ERROR'  		   : 17,
+			  'NOT_FIND_ERROR'			   : 18}
 
 # two core global variables
 currentState = None
@@ -91,12 +94,11 @@ class User():
 						serverIP,',',serverPort,']')
 				except:
 					print('Failed to connect to roomServer again: ', errmsg)
-					print("""p2pclient program shutdowns due to failure to connect to roomserver,
-							please check if the server address and port are correct, or check if 
-							the server is already working""")
+					print(('p2pclient program shutdowns due to failure to connect to roomserver, '
+						   'please check if the server address and port are correct, or check if '
+						   'the server is already working'))
 					self._clientSocket.close()
 					sys.exit(1)
-			
 		if (localPort is not None):
 			self._serverSocket = socket.socket()
 			try:
@@ -112,10 +114,10 @@ class User():
 					print('finish setting user socket: open server port:', localPort)
 				except socket.error as emsg:
 					print("Socket bind error again: ", emsg)
-					print("""p2pclient program shutdowns due to failure to bind the listening socket
-							, please check your socket usage and try another available port""")
+					print( ('p2pclient program shutdowns due to failure to bind the listening socket '
+							', please check your socket usage and try another available port'))
 					self._serverSocket.close()
-					sys.exit(1)
+					return[Exceptions['SOCKET_BIND_ERROR']]
 		else:
 			print('Ignore binding port for the time being')
 	def _setname(self, name):
@@ -142,8 +144,8 @@ class User():
 			return Exceptions['INVALID_USERNAME']
 		self._setname(username)
 	def bindServerSocket(self):
-		self._socketSetup(serverIP = None, serverPort = None,
-							localIP = self._getip(), localPort = self._getport())
+		return self._socketSetup(serverIP = None, serverPort = None,
+									localIP = self._getip(), localPort = self._getport())
 
 
 # state class
@@ -178,7 +180,9 @@ class State():
 	def _getroominfo(self):
 		return self._roominfo
 	def _setforwardlink(self, forwardLink):
-			self._forwardlink = forwardLink
+		self._forwardlink = forwardLink
+		if forwardLink is not None:
+			print("set forward link with hash", forwardLink[0])
 	def _linksetup(self):
 		self._backwardlinks = []
 		self._setforwardlink(None)
@@ -204,6 +208,7 @@ class State():
 		return self._backwardlinks
 	def stateTransition(self, action):
 		self._setstate(transition(self._getstate(),action))
+		print('state transit:', self._getstate())
 	def updateRoomName(self, roomName):
 		self._setroomname(roomName)
 	def updateRoomInfo(self, roomInfo):
@@ -220,6 +225,18 @@ class State():
 	def updateMsgID(self, msgID):
 		if self._getmsgid() < msgID:
 			self._setmsgid(msgID)
+	def newMsgID(self):
+		msgID = self._getmsgid()
+		self._setmsgid(msgID+1)
+		return msgID+1
+	def getSocketFromHash(self, hash_):
+		if (self._getforwardlink() is not None) and (self._getforwardlink()[0] == hash_):
+			return self._getforwardlink()[1]
+		for i in self._getbackwardlinks():
+			if i[0] == hash_:
+				return i[1]
+		return Exceptions['NOT_FIND_ERROR']
+
 
 #
 # This is the hash function for generating a unique
@@ -268,7 +285,8 @@ def transition(currentState, action):
 	return {States['STARTED']: lambda x: FromStarted(x),
 	 		States['NAMED']: lambda x: FromNamed(x),
 	 		States['JOINED']: lambda x: FromJoined(x),
-	 		States['CONNECTED']: lambda x: FromConnected(x)}[currentState](action)
+	 		States['CONNECTED']: lambda x: FromConnected(x),
+	 		States['TERMINATED']: States['TERMINATED']}[currentState](action)
 
 
 # facilitation function for handshake process in stage 2
@@ -285,13 +303,13 @@ def findPosition(roomInfo, name, ip, port):
 def socketOperation(socket, sendMessage, receive = True):
 	try:
 		socket.send(sendMessage.encode('ascii'))
-	except socket.error as errmsg:
+	except IOError as errmsg:
 		print('socket sending error: ', errmsg)
 		return Exceptions['SOCKET_ERROR']
 	if receive:
 		try:
 			responseData = socket.recv(BUFSIZ)
-		except socket.error as errmsg:
+		except IOError as errmsg:
 			print('socket receving error: ', errmsg)
 			return Exceptions['SOCKET_ERROR']
 		return responseData.decode('ascii')
@@ -327,6 +345,12 @@ def keepAliveThread():
 	global currentState, user
 	print('keep alive thread start working ... ')
 	while True:
+		stateLock.acquire()
+		if currentState.isAfter(States['CONNECTED']):
+			print("keep alive: find exit state, quiting ...")
+			stateLock.release()
+			sys.exit(1)
+		stateLock.release()
 		sleep(PROTOCAL_TIME)
 		userInfoLock.acquire()
 		clientSocket = user._getClientSocket()
@@ -362,7 +386,12 @@ def handShakeThread():
 	startListen = 0
 	while 1:
 		# update roominfo again
+		# and check state in order to quit elegantly
+
 		stateLock.acquire()
+		if currentState.isAfter(States['CONNECTED']):
+			print('Handshake: find exit state, quiting ...')
+			sys.exit(1)
 		roomName = currentState._getroomname()
 		roomInfo = currentState._getroominfo()
 		msgID = currentState._getmsgid()
@@ -428,12 +457,19 @@ def handShakeThread():
 					currentState.updateMsgID(int(message[0]))
 					stateLock.release()
 					successFlag = 1
+					hashStr = reduce(lambda x, y: x+y, roomInfo[realIndex: realIndex+3])
+					forwardHash = sdbm_hash(hashStr)
 				break
 				
 					
 		if not startListen:
 			userInfoLock.acquire()
-			user.bindServerSocket()
+			flag = user.bindServerSocket()
+			if flag is Exceptions['SOCKET_BIND_ERROR']:
+				stateLock.acquire()
+				currentState.stateTransition(Actions['QUIT'])
+				stateLock.release()
+				sys.exit(1)
 			userInfoLock.release()
 			serverThread = Thread(target=serverSocketThread, name='server')
 			serverThread.start()
@@ -441,7 +477,8 @@ def handShakeThread():
 		if successFlag == 1:
 			stateLock.acquire()
 			currentState.stateTransition(Actions['HANDSHAKE'])
-			currentState._setforwardlink(handShakeSocket)
+			handShakeTuple = (forwardHash, handShakeSocket)
+			currentState._setforwardlink(handShakeTuple)
 			stateLock.release()
 			break
 		else:
@@ -458,21 +495,41 @@ def serverSocketThread():
 	clientSocket = user._getClientSocket()
 	userInfoLock.release()
 	stateLock.acquire()
-	forwardLinkSocket = currentState._getforwardlink()
+	forwardLinkTuple = currentState._getforwardlink()
 	roomName = currentState._getroomname()
 	roomInfo = currentState._getroominfo()
 	stateLock.release()
 	hashList = getHashList(roomInfo)
 	readList = [serverSocket]
-	if (forwardLinkSocket):
-		readList.append(forwardLinkSocket)
+	if (forwardLinkTuple):
+		readList.append(forwardLinkTuple[1])
+		hasForward = 1
+	else:
+		hasForward = 0
 	while 1:
+		stateLock.acquire()
+		if currentState.isAfter(States['CONNECTED']):
+			print('Server Thread: find exit state, quiting ...')
+			stateLock.release()
+			sys.exit(1)
+		if not hasForward:
+			forwardLinkTuple = currentState._getforwardlink()
+			if forwardLinkTuple is not None:
+				readList.append(forwardLinkTuple[1])
+				hasForward = 1
+			else:
+				print("Server Thread: havn't got forward link socket, try it later")
+		stateLock.release()
 		print('Server Thread: listening ...')
 		try:
 			readable, writeable, exceptions = select(readList,[],[],PROTOCAL_TIME)
-		except socket.error as errmsg:
-			print("Server thread: encounter error", errmsg)
-
+		except Exception as errmsg:
+			print("Server Thread: encounter error", errmsg)
+			print("Server Thread: shutdown due to server socket ... ")
+			stateLock.acquire()
+			currentState.stateTransition(Actions['QUIT'])
+			stateLock.release()
+			sys.exit(1)
 		if readable:
 			print('Server Thread: catch sth')
 			print (readable)
@@ -556,7 +613,7 @@ def serverSocketThread():
 						print('Server Thread: Bad message from other chatroom')
 						CmdWin.insert(1.0, "\nError: Received an message from other chatroom\n")
 						continue
-					if not messageHeader[2] in hashList:
+					if not int(messageHeader[2]) in hashList:
 						print('Server Thread: Get an message with unknow sender, check roomserver for update')
 						stateLock.acquire()
 						message_ = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
@@ -574,10 +631,18 @@ def serverSocketThread():
 						stateLock.release()
 						print('Server Thread: Joined finish and check the info again')
 						hashList = getHashList(roomInfo)
-					if not messageHeader[2] in hashList:
+					if not int(messageHeader[2]) in hashList:
+						print('hashList', hashList)
+						print('sender', messageHeader[2])
+						print('is equal', hashList)
 						print('Server Thread: Receive an message from an unknown sender, discard it')
 						continue
 					stateLock.acquire()
+					senderSocket = currentState.getSocketFromHash(int(messageHeader[2]))
+					if senderSocket is Exceptions['NOT_FIND_ERROR']:
+						print("Server Thread: cannot find sender socket")
+						stateLock.release()
+						continue
 					if int(messageHeader[4]) <= currentState._getmsgid():
 						print('Server Thread: Receive a previous message, discard it')
 						CmdWin.insert(1.0, '\nReceive a previous message!\n')
@@ -585,12 +650,21 @@ def serverSocketThread():
 						continue
 					currentState.updateMsgID(int(messageHeader[4]))
 					stateLock.release()
-					senderName = roomInfo[hashList.index(messageHeader[2])*3+1]
-					content = message.replace(':'.join(messageHeader), '').replace(PROTOCAL_END, '')
+					senderName = roomInfo[hashList.index(int(messageHeader[2]))*3+1]
+					content = message.replace((':'.join(messageHeader)+':'), '').replace(PROTOCAL_END, '')
 					if len(content) == int(messageHeader[5]):
 						MsgWin.insert(1.0, '\n['+senderName+']: '+content)
 					else:
-						print("Display Error: the length content does not match the header")
+						print("Server Thread: the length content does not match the header")
+						continue
+					# dispatch all messages to other users who have not possibly seen this message
+					for listener in readList:
+						if listener in [sockfd, senderSocket, serverSocket]:
+							continue
+						output = socketOperation(listener, message, receive=False)
+						if output is Exceptions['SOCKET_ERROR']:
+							print("Server Thread: failed to dispatch the message to ", listener.getsockname())
+
 
 		else:
 			print ("Server Thread: idling")
@@ -796,10 +870,6 @@ def do_Join_Debug(roomName):
 def do_Send():
 	global currentState, user
 	CmdWin.insert(1.0, "\nPress Send")
-	inputData = userentry.get()
-	if len(inputData.strip(' ')) == 0:
-		CmdWin.insert(1.0, "\nSend Error: Invalid message!")
-		return
 	# check stage
 	stateLock.acquire()
 	checkFlag = currentState.isAfter(States['NAMED'])
@@ -808,26 +878,30 @@ def do_Send():
 		CmdWin.insert(1.0, "\nSend Error: You are not in any chatroom, please join a chatroom first!")
 		userentry.delete(0, END)
 		return
+	inputData = userentry.get()
+	if len(inputData.strip(' ')) == 0:
+		CmdWin.insert(1.0, "\nSend Error: Invalid message!")
+		return
 	# check for all back and forward link
+	sendingList = []
 	stateLock.acquire()
-	forwardLink = currentState._getforwardlink()
+	forwardLinkTuple = currentState._getforwardlink()
+	if forwardLinkTuple is not None:
+		forwardLink = forwardLinkTuple[1] 
+		sendingList.append(forwardLink)
 	backwardLinkTupleList = currentState._getbackwardlinks()
 	backwardLinks = [i[1] for i in backwardLinkTupleList]
+	roomName = currentState._getroomname()
 	stateLock.release()
-	sendingList = []
-	if not forwardLink is None:
-		sendingList.append(forwardLink)
 	if len(backwardLinks) > 0 :
 		sendingList = sendingList + backwardLinks
 	# get all infos desired by sending Textmessage
-	stateLock.acquire()
-	roomName = currentState._getroomname()
-	msgID = currentState._getmsgid()
-	stateLock.release()
 	userInfoLock.acquire()
 	userName = user._getname()
 	userIp = user._getip()
 	userPort = user._getport()
+	# update msgID
+	msgID = currentState.newMsgID()
 	userInfoLock.release()
 
 	# construct the protocal message
@@ -840,7 +914,8 @@ def do_Send():
 			print('Send Error: cannot sent the message to', socket.getsockname())
 	MsgWin.insert(1.0, '\n['+userName+']: '+inputData)
 
-
+	# clear the entry if success
+	userentry.delete(0, END)
 
 def do_Quit():
 	CmdWin.insert(1.0, "\nPress Quit")
@@ -903,10 +978,10 @@ def main():
 	global currentState, user
 	currentState = State()
 	user = User(sys.argv[1], int(sys.argv[2]), socket.gethostbyname(socket.gethostname()),int(sys.argv[3]))
-	# win.mainloop()
-	do_User_Debug('abc')
-	do_List_Debug()
-	do_Join_Debug('aaaaa')
+	win.mainloop()
+	# do_User_Debug('abc')
+	# do_List_Debug()
+	# do_Join_Debug('aaaaa')
 
 if __name__ == "__main__":
 	main()

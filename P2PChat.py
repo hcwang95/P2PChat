@@ -198,10 +198,13 @@ class State():
 		else:
 			self._backwardlinks.append(tuple)
 			print('add new backward link with hash', tuple[0])
+	def _remvoeforwardlink(self):
+		self._forwardlink = None
 	def _removebackwardlinksBySocket(self, socket):
 		for socketTuple in self._getbackwardlinks():
 			if socketTuple[1] is socket:
 				self._backwardlinks.remove(socketTuple)
+				return
 		return Exceptions['BACKWARDLINK_NOT_EXIST']
 	def _getbackwardlinks(self):
 		return self._backwardlinks
@@ -222,7 +225,6 @@ class State():
 	def inRoom(self):
 		return self._getroomname() is not None
 	def updateMsgID(self, msgID):
-		print("\n"*5,'update msgID to', msgID)
 		if self._getmsgid() < msgID:
 			self._setmsgid(msgID)
 	def newMsgID(self):
@@ -304,13 +306,13 @@ def socketOperation(socket, sendMessage, receive = True):
 	try:
 		socket.send(sendMessage.encode('ascii'))
 	except IOError as errmsg:
-		print('socket sending error: ', errmsg)
+		print('socket', socket, ' sending error: ', errmsg)
 		return Exceptions['SOCKET_ERROR']
 	if receive:
 		try:
 			responseData = socket.recv(BUFSIZ)
 		except IOError as errmsg:
-			print('socket receving error: ', errmsg)
+			print('socket', socket, ' receving error: ', errmsg)
 			return Exceptions['SOCKET_ERROR']
 		return responseData.decode('ascii')
 
@@ -380,7 +382,7 @@ def keepAliveThread():
 # TODO: thread for handshake procedure
 # follow the logic of spec
 #
-def handShakeThread():
+def handShakeThread(startListen):
 	# get info of chatroom
 	global currentState, user
 	# find myself position in the roomInfo
@@ -390,7 +392,6 @@ def handShakeThread():
 	myPort = user._getport()
 	userInfoLock.release()
 	successFlag = 0
-	startListen = 0
 	while 1:
 		# update roominfo again
 		# and check state in order to quit elegantly
@@ -487,13 +488,14 @@ def handShakeThread():
 			stateLock.release()
 			break
 		else:
-			print('HandShake: failed to find a forward link with one loop, do it again', PROTOCAL_TIME,'seconds later')
+			handshakeTime = PROTOCAL_TIME / 5
+			print('HandShake: failed to find a forward link with one loop, do it again', handshakeTime,'seconds later')
 			print('startListen', startListen)
-			for i in range(20):
+			for i in range(4):
 				stateLock.acquire()
 				checkExit("Handshake")
 				stateLock.release()
-				sleep(PROTOCAL_TIME / 20)
+				sleep(handshakeTime / 4)
 	print('HandShake: finish work and shutdown ... ')
 
 
@@ -503,6 +505,9 @@ def serverSocketThread():
 	userInfoLock.acquire()
 	serverSocket = user._getServerSocket()
 	clientSocket = user._getClientSocket()
+	myName = user._getname()
+	myIp = user._getip()
+	myPort = user._getport()
 	userInfoLock.release()
 	stateLock.acquire()
 	forwardLinkTuple = currentState._getforwardlink()
@@ -539,16 +544,33 @@ def serverSocketThread():
 			stateLock.release()
 			sys.exit(1)
 		if readable:
-			print('Server Thread: catch sth')
-			print (readable)
+			print('Server Thread: catch something')
 			for sockfd in readable:
 				# 
 				readable.remove(sockfd)
+				stateLock.acquire()
+				if not hasForward:
+					forwardLinkTuple = currentState._getforwardlink()
+					if forwardLinkTuple is not None:
+						readList.append(forwardLinkTuple[1])
+						hasForward = 1
+					else:
+						print("Server Thread: havn't got forward link socket, try it later")
+				stateLock.release()
 				if sockfd is serverSocket:
 					backwardLink, address = sockfd.accept()
 					requestData = backwardLink.recv(BUFSIZ)
 					requestMessage = requestData.decode('ascii')
 					# validate message
+					# frist filter to ensure it is not quiting message:
+					if requestMessage == 'QUIT'+PROTOCAL_END:
+						print('Server Thread: receive quitting message, start quiting')
+						responseMessage = 'OK'+PROTOCAL_END
+						socketOperation(backwardLink, responseMessage, receive=False)
+						# close all sockets
+						for socketToClose in readList:
+							socketToClose.close()
+						sys.exit(0)
 					pattern = "^P:[^:]+:[^:]+:(\d+\.){3}\d+:\d+:\d+::\r\n$"
 					if (re.match(pattern, requestMessage) is None):
 						print('Server Thread: receive a invlid request', requestMessage)
@@ -588,6 +610,7 @@ def serverSocketThread():
 						print('Server Thread: refuse that request by ignoring it')
 						backwardLink.close()
 						continue
+
 					else:
 						print('Server Thread: match the info of newly coming backward link')
 						print('Server Thread: establish connection ...')
@@ -620,9 +643,30 @@ def serverSocketThread():
 						readList.remove(sockfd)
 						sockfd.close()
 						stateLock.acquire()
-						# remove the backward link of the close one
-						if currentState._removebackwardlinksBySocket(sockfd) is Exceptions['BACKWARDLINK_NOT_EXIST']:
-							print("Server Thread: cannot find the particular quitting socket")
+						# if closing socket is forward link, remove it from the current state 
+						# and start handshake again
+						forwardLinkTuple = currentState._getforwardlink()
+						if forwardLinkTuple is not None:
+							if sockfd is forwardLinkTuple[1]:
+								currentState._remvoeforwardlink()
+								print('Server Thread: remove the forward link')
+								print('Server Thread: start handshake thread again')
+								handShake = Thread(target=handShakeThread, name='handShake', args=(1,))
+								handShake.start()
+							else:
+								# if it is backwardlink 
+								# remove the it with no other action
+								if currentState._removebackwardlinksBySocket(sockfd) is Exceptions['BACKWARDLINK_NOT_EXIST']:
+									print("Server Thread: cannot find the particular quitting socket")
+								else:
+									print("Server Thread: remove the backward link")
+						else:
+							# if it is backwardlink 
+							# remove the it with no other action
+							if currentState._removebackwardlinksBySocket(sockfd) is Exceptions['BACKWARDLINK_NOT_EXIST']:
+								print("Server Thread: cannot find the particular quitting socket")
+							else:
+								print("Server Thread: remove the backward link")
 						stateLock.release()
 						continue
 
@@ -666,7 +710,8 @@ def serverSocketThread():
 						print('Server Thread: Receive a previous message, discard it')
 						print('Server Thread: original megID is', currentState._getmsgid())
 						print('Server Thread: but now we get a message with msgID:',messageHeader[4])
-						CmdWin.insert(1.0, '\nReceive a previous message!\n')
+						if int(messageHeader[4]) == currentState._getmsgid():
+							CmdWin.insert(1.0, '\nReceive a previous message!\n')
 						stateLock.release()
 						continue
 					currentState.updateMsgID(int(messageHeader[4]))
@@ -674,7 +719,7 @@ def serverSocketThread():
 					senderName = roomInfo[hashList.index(int(messageHeader[2]))*3+1]
 					content = message.replace((':'.join(messageHeader)+':'), '').replace(PROTOCAL_END, '')
 					if len(content) == int(messageHeader[5]):
-						MsgWin.insert(1.0, '\naaa['+senderName+']: '+content)
+						MsgWin.insert(1.0, '\n['+senderName+']: '+content)
 					else:
 						print("Server Thread: the length content does not match the header")
 						continue
@@ -856,7 +901,7 @@ def do_Join():
 	keepAlive = Thread(target=keepAliveThread, name='keepAlive')
 	keepAlive.start()
 	# open the handshake thread
-	handShake = Thread(target=handShakeThread, name='handShake')
+	handShake = Thread(target=handShakeThread, name='handShake', args=(0,))
 	handShake.start()
 # function for debuging in the command line
 def do_Join_Debug(roomName):
@@ -886,7 +931,7 @@ def do_Join_Debug(roomName):
 	keepAlive = Thread(target=keepAliveThread, name='keepAlive')
 	keepAlive.start()
 	# open the handshake thread
-	handShake = Thread(target=handShakeThread, name='handShake')
+	handShake = Thread(target=handShakeThread, name='handShake', args=(0,))
 	handShake.start()
 
 def do_Send():
@@ -941,19 +986,36 @@ def do_Send():
 
 def do_Quit():
 	CmdWin.insert(1.0, "\nPress Quit")
-	cleanUp()
-	sys.exit(0)
 	global currentState
 	stateLock.acquire()
-	currentState.stateTransition(Actions['QUIT'])
 	stateLock.release()
 	cleanUp()
-	win.distroy()
+	currentState.stateTransition(Actions['QUIT'])
 	exit(0)
 
-# TODO clean up procedure to close all socket fds
+# clean up procedure to close all socket fds
+# try to connect server thread and send close function
 def cleanUp():
-	pass
+	stateLock.acquire()
+	flag = currentState.isAfter(States['NAMED'])
+	stateLock.release()
+	if flag:
+		signalSocket = socket.socket()
+		try:
+			userInfoLock.acquire()
+			signalSocket.connect((user._getip(), user._getport()))
+			userInfoLock.release()
+			message = 'QUIT'+PROTOCAL_END
+			if socketOperation(signalSocket, message, receive=True) == "OK"+PROTOCAL_END:
+				print('successfully notice server thread to quit')
+			elif socketOperation(signalSocket, message, receive=True) == "OK"+PROTOCAL_END:
+				print('successfully notice server thread to quit')
+			else:
+				print('cannot manually inform the server thread, please wait at most 20 seconds to let it close')
+		except Exception as errmsg:
+			print("Quit Error: Cannot connect server socket, give up trying ...")
+	win.destroy()
+
 #
 # Set up of Basic UI
 #

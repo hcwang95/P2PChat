@@ -4,7 +4,7 @@
 # Student name and No.:     N/A
 # Development platform:     Ubuntu 1604
 # Python version: 			Python 3.5.2
-# Version: 					1.1
+# Version: 					1.2
 
 
 from tkinter import *
@@ -26,6 +26,7 @@ PROTOCAL_END = '::\r\n'
 PROTOCAL_TIME = 20
 #
 # Global variables
+# define some state, actions and self-defined exceptions
 #
 States = {'STARTED'    : 0,
 		  'NAMED'      : 1,
@@ -49,9 +50,10 @@ Exceptions = {'INVALID_USERNAME'           : 11,
 			  'SOCKET_BIND_ERROR'  		   : 17,
 			  'NOT_FIND_ERROR'			   : 18}
 
-# two core global variables
+# two core global variables that maintain crucial info
 currentState = None
 user = None
+
 # two lock for maintaining user info and current state info
 stateLock = Lock()
 userInfoLock = Lock()
@@ -59,8 +61,9 @@ userInfoLock = Lock()
 # user class
 # maintaining user program basic info
 # include:
-# 1. roomserver ipv4 address and port
-# 2. p2pclient listening port
+# 1. roomserver ipv4 address (type: string, accept 'localhost')
+#    and port number (type:int)
+# 2. p2pclient listening port (type:int)
 # 3. user socket connecting to roomserver and
 #    and socket as local server socket
 # 4. username validation rules
@@ -76,6 +79,11 @@ class User():
 		self.validation = re.compile("^[\x00-\x7F]+$")
 		self._socketSetup(serverIP, serverPort)
 	def _socketSetup(self, serverIP=None, serverPort=None, localIP=None, localPort=None):
+		# procedure for setting up user socket
+		# this function will be call twice,
+		# first for setting up socket connecting roomserver
+		# second for setting listening socket (server socket)
+
 		print("setting up user socket...")
 		if (serverIP is not None and serverPort is not None):
 			self._clientSocket = socket.socket()
@@ -99,7 +107,9 @@ class User():
 						   'the server is already working'))
 					self._clientSocket.close()
 					sys.exit(1)
+
 		if (localPort is not None):
+			# establish p2p server socket and start listening
 			self._serverSocket = socket.socket()
 			try:
 				self._serverSocket.bind((localIP,localPort))
@@ -110,6 +120,8 @@ class User():
 				print("try again")
 				try:
 					self._serverSocket.bind((localIP,localPort))
+					# personal choice of length of listen queue
+					# enough to pass all pressure test at most 50 concurrent requests
 					self._serverSocket.listen(10)
 					print('finish setting user socket: open server port:', localPort)
 				except OSError as emsg:
@@ -120,6 +132,7 @@ class User():
 					return[Exceptions['SOCKET_BIND_ERROR']]
 		else:
 			print('Ignore binding port for the time being')
+	# some basic private setter and getter
 	def _setname(self, name):
 		self._username = name
 	def _setip(self, ip):
@@ -139,13 +152,17 @@ class User():
 		return self._clientSocket
 	def _getServerSocket(self):
 		return self._serverSocket
+	# boolean function for condition checking
 	def hasUserName(self):
 		return self._getname() is not None
+	# higher public function to set name
 	def setUserName(self, username):
 		# check first
 		if (self.validation.match(username) is None) or (':' in username):
 			return Exceptions['INVALID_USERNAME']
 		self._setname(username)
+	# public function for set up server socket binding
+	# call lower private function for clean abstraction
 	def bindServerSocket(self):
 		return self._socketSetup(serverIP = None, serverPort = None,
 									localIP = self._getip(), localPort = self._getport())
@@ -157,9 +174,11 @@ class User():
 # 1. current room name (default None)
 # 2. current room info (a list [MSID, userAName, userAIp, userAPort,
 # 								userBName, userBIp, userBPort,...])
-# 3. forward Links(for stage 2)
-# 4. backward Links List (for stage 2)
-# 5. msgID (TODO: for stage 2)
+# 3. forward Links and corresponding update function
+# 4. backward Links List and corresponding update function
+# 5. msgID and corresponding update function
+# 6. some facilitate function for better abstraction and
+#    seperate of responsibility
 class State():
 	def __init__(self):
 		self._setstate(States['STARTED'])
@@ -167,6 +186,7 @@ class State():
 		self._setroominfo(None)
 		self._setmsgid(0)
 		self._linksetup()
+	# basic setter and getter
 	def _setstate(self,state):
 		self._state = state
 	def _getstate(self):
@@ -211,11 +231,14 @@ class State():
 		return Exceptions['BACKWARDLINK_NOT_EXIST']
 	def _getbackwardlinks(self):
 		return self._backwardlinks
+	# function for state transition record
 	def stateTransition(self, action):
 		self._setstate(transition(self._getstate(),action))
 		# print('state transit:', self._getstate())
+	# public function to update room name
 	def updateRoomName(self, roomName):
 		self._setroomname(roomName)
+	# public function to update room infomation
 	def updateRoomInfo(self, roomInfo):
 		if self._getroominfo() is None:
 			self._setroominfo(roomInfo)
@@ -224,17 +247,28 @@ class State():
 		else:
 			pass
 			# print('room member list: duplicated info, do not update')
+	# function for condition checking
+	# isAfter means strictly after one of the state
+	# for example, after 'Joined' is 'connected' and 'terminated'
 	def isAfter(self, state):
 		return self._getstate() > state
+	# function for condition checking
+	# return true if the peer program now is in chatroom
 	def inRoom(self):
 		return self._getroomname() is not None
+	# public function for update message ID
+	# when getting message passively
 	def updateMsgID(self, msgID):
 		if self._getmsgid() < msgID:
 			self._setmsgid(msgID)
+	# public function for update message ID when
+	# sending message actively
 	def newMsgID(self):
 		msgID = self._getmsgid()
 		self._setmsgid(msgID+1)
 		return msgID+1
+	# facilite function for getting socket base on its hash value
+	# will return error if cannot find
 	def getSocketFromHash(self, hash_):
 		if (self._getforwardlink() is not None) and (self._getforwardlink()[0] == hash_):
 			return self._getforwardlink()[1]
@@ -258,10 +292,12 @@ def sdbm_hash(instr):
 		hash = int(ord(c)) + (hash << 6) + (hash << 16) - hash
 	return hash & 0xffffffffffffffff
 
+# facilite function for getting hashlist based on the roominfo
 def getHashList(roomInfo):
 	return 	list(map(lambda x: sdbm_hash(x), 
 				map(lambda x: reduce(lambda m, n: m+n, x),
 					[roomInfo[y:y+3] for y in range(1,len(roomInfo),3)])))
+
 # five facilited state transition functions:
 def FromStarted(action):
 	return {Actions['LIST']: States['STARTED'], 
@@ -288,6 +324,8 @@ def FromConnected(action):
 
 def FromTerminated(action):
 	return States['TERMINATED']
+
+
 # state transition function, critical, calling should be protected by logic
 def transition(currentState, action):
 	return {States['STARTED']: lambda x: FromStarted(x),
@@ -297,7 +335,9 @@ def transition(currentState, action):
 	 		States['TERMINATED']: lambda x : FromTerminated(x)}[currentState](action)
 
 
-# facilitation function for handshake process in stage 2
+# function for handshake process in stage 2
+# can find the index in the roomInfo based
+# on three infomation provided
 def findPosition(roomInfo, name, ip, port):
 	for i in range(1,len(roomInfo),3):
 		# print(roomInfo[i], roomInfo[i+1], roomInfo[i+2])
@@ -307,6 +347,8 @@ def findPosition(roomInfo, name, ip, port):
 #
 # functions for socket sending and receiving with block
 # similar to C and C++ marco just for reducing duplication
+# one extra argument for option whether sender is looking for
+# response message
 #
 def socketOperation(socket, sendMessage, receive = True):
 	try:
@@ -322,19 +364,11 @@ def socketOperation(socket, sendMessage, receive = True):
 			return Exceptions['SOCKET_ERROR']
 		return responseData.decode('ascii')
 
-# abstraction for checking exit status
-# must be inside of stateLock
-def checkExit(threadName):
-	global currentState
-	if currentState.isAfter(States['CONNECTED']):
-			print(threadName + ': find exit state, quiting ...')
-			stateLock.release()
-			sys.exit(1)
-
 #
 # functions for blocking socket to send and recv message
 # with timeout option, return Exception['TIMEOUT'] if timeout
-# para: timeout - seconds 
+# para: timeout (type-> seconds) 
+# will return timeout exception if timeout occurs
 #
 def socketOperationTimeout(socket, sendMessage, timeout):
 	readList = [socket]
@@ -343,6 +377,7 @@ def socketOperationTimeout(socket, sendMessage, timeout):
 	except OSError as errmsg:
 		print('socket sending error: ', errmsg)
 		return Exceptions['SOCKET_ERROR']
+	# realize timeout feature by select
 	available = select(readList, [], [], timeout)
 	if available:
 		sockfd = readList[0]
@@ -354,6 +389,17 @@ def socketOperationTimeout(socket, sendMessage, timeout):
 			return Exceptions['SOCKET_ERROR']
 	else:
 		return Exceptions['TIMEOUT']
+
+# abstraction for checking exit status
+# must be inside of stateLock
+def checkExit(threadName):
+	global currentState
+	if currentState.isAfter(States['CONNECTED']):
+			print(threadName + ': find exit state, quiting ...')
+			stateLock.release()
+			sys.exit(1)
+
+
 #
 # functions for facilitation threads of keep alive procedure
 # resend 'JOIN' request ever 20 seconds after successfully joining

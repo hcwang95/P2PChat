@@ -365,12 +365,14 @@ def keepAliveThread():
 			print('currentState:', currentState._getstate())
 			stateLock.release()
 			sleep(PROTOCAL_TIME / 20)
+		print("locked at 368")
 		userInfoLock.acquire()
 		clientSocket = user._getClientSocket()
 		message = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
 		requestMessage = 'J:' + message + PROTOCAL_END
 		responseMessage = socketOperation(clientSocket, requestMessage)
 		userInfoLock.release()
+		print("368 released")
 		if (responseMessage[0] != 'M'):
 			print("\nFailed to join: roomserver error\n")
 			continue
@@ -389,27 +391,33 @@ def handShakeThread(startListen):
 	# get info of chatroom
 	global currentState, user
 	# find myself position in the roomInfo
+	print("locked at 394")
 	userInfoLock.acquire()
+	print("394 acquired")
 	myName = user._getname()
 	myIp = user._getip()
 	myPort = user._getport()
 	userInfoLock.release()
+	print("394 released")
 	successFlag = 0
 	while 1:
 		# update roominfo again
 		# and check state in order to quit elegantly
-
-
+		print("locked at 406")
 		userInfoLock.acquire()
 		clientSocket = user._getClientSocket()
 		message = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
 		requestMessage = 'J:' + message + PROTOCAL_END
+		print('socketoperation starts')
 		responseMessage = socketOperation(clientSocket, requestMessage)
+		print('socketoperation finishes')
 		if (responseMessage[0] != 'M'):
 			print('Handshake: failed to request roomserver to update data')
 			print("\nroomserver error\n")
+			print("406 released")
 			userInfoLock.release()
 			continue
+		print("406 released")
 		userInfoLock.release()
 		stateLock.acquire()
 		checkExit("Handshake")
@@ -471,26 +479,32 @@ def handShakeThread(startListen):
 						'] but failed, try another')
 					start = (start + 1) % len(gList)
 					continue
-				if responseMessage[0] == 'S':
-					print('HandShake: successfully connect with a peer through peer-to-peer handshake with',
-						roomInfo[realIndex])
-					message = responseMessage.replace(PROTOCAL_END, '').split(':')[1:]
-					stateLock.acquire()
-					try:
-						currentState.updateMsgID(int(message[0]))
-					except Exception:
-						print('Handshake: some error -> msgID:$', (message[0]))
-					stateLock.release()
-					successFlag = 1
-					hashStr = reduce(lambda x, y: x+y, roomInfo[realIndex: realIndex+3])
-					forwardHash = sdbm_hash(hashStr)
+				try: 
+					if responseMessage[0] == 'S':
+						print('HandShake: successfully connect with a peer through peer-to-peer handshake with',
+							roomInfo[realIndex])
+						message = responseMessage.replace(PROTOCAL_END, '').split(':')[1:]
+						stateLock.acquire()
+						try:
+							currentState.updateMsgID(int(message[0]))
+						except Exception:
+							print('Handshake: some error -> msgID:$', (message[0]))
+						stateLock.release()
+						successFlag = 1
+						hashStr = reduce(lambda x, y: x+y, roomInfo[realIndex: realIndex+3])
+						forwardHash = sdbm_hash(hashStr)
+				except Exception:
+					print('HandShake: get empty return message')
+				
 				break
 				
 					
 		if not startListen:
+			print("locked at 496")
 			userInfoLock.acquire()
 			flag = user.bindServerSocket()
 			userInfoLock.release()
+			print("496 released")
 			if flag is Exceptions['SOCKET_BIND_ERROR']:
 				stateLock.acquire()
 				currentState.stateTransition(Actions['QUIT'])
@@ -521,6 +535,7 @@ def handShakeThread(startListen):
 def serverSocketThread():
 	global user, currentState
 	print("Server Thread: start working ...")
+	print("locked at 531")
 	userInfoLock.acquire()
 	serverSocket = user._getServerSocket()
 	clientSocket = user._getClientSocket()
@@ -528,6 +543,7 @@ def serverSocketThread():
 	myIp = user._getip()
 	myPort = user._getport()
 	userInfoLock.release()
+	print("531 released")
 	stateLock.acquire()
 	forwardLinkTuple = currentState._getforwardlink()
 	roomName = currentState._getroomname()
@@ -809,14 +825,17 @@ def do_User():
 		return
 	stateLock.release()
 	# change the username
+	print("locked at 821")
 	userInfoLock.acquire()
 	flag = user.hasUserName()
 	if (user.setUserName(username) is Exceptions['INVALID_USERNAME']):
 		print('\nFailed: ' + invalidMessage[0] +'\n')
 		print('\nFailed: ' + invalidMessage[0])
 		userInfoLock.release()
+		print("821 released")
 		return
 	userInfoLock.release()
+	print("821 released")
 	# set state to named
 	stateLock.acquire()
 	currentState.stateTransition(Actions['USER'])
@@ -849,12 +868,15 @@ def do_User_Debug(username):
 		return
 	stateLock.release()
 	# change the username
+	print("locked at 863")
 	userInfoLock.acquire()
 	if (user.setUserName(username) is Exceptions['INVALID_USERNAME']):
 		print('Failed: ' + invalidMessage[0])
 		userInfoLock.release()
+		print("863 released")
 		return
 	userInfoLock.release()
+	print("863 released")
 	# set state to named
 	stateLock.acquire()
 	currentState.stateTransition(Actions['USER'])
@@ -866,17 +888,22 @@ def do_List_Debug():
 
 	global user, currentState
 
+
+	print("locked at 883")
 	userInfoLock.acquire()
 	clientSocket = user._getClientSocket()
 	requestMessage = 'L' + PROTOCAL_END
 	responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
 	userInfoLock.release()
+	print("883 released")
 	if responseMessage is Exceptions['TIMEOUT']:
 		print('\nMain Thread: list request timeout, try again')
+		print("locked at 892")
 		userInfoLock.acquire()
 		requestMessage = 'L' + PROTOCAL_END
 		responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
 		userInfoLock.release()
+		print("892 released")
 		if responseMessage is Exceptions['TIMEOUT']:
 			print('\nMain Thread: second try timeout, discard the list request')
 		else:
@@ -897,13 +924,17 @@ def do_Join():
 
 	print("\nPress JOIN")
 	#check username
+
+	print("locked at 919")
 	userInfoLock.acquire()
+
 	if not user.hasUserName():
 		print("\nError: Please input username first!\n")
 		print("\nError: Please input username first!\n")
 		userInfoLock.release()
 		return
 	userInfoLock.release()
+	print("919 released")
 	# check if it is already in a chatroom
 	stateLock.acquire()
 	if currentState.inRoom():
@@ -919,12 +950,14 @@ def do_Join():
 		print("\nFailed: invalid room name")
 		return
 	# send request to roomserver
+	print("locked at 944")
 	userInfoLock.acquire()
 	clientSocket = user._getClientSocket()
 	message = ':'.join([roomName, user._getname(), user._getip(), str(user._getport())])
 	requestMessage = 'J:' + message + PROTOCAL_END
 	responseMessage = socketOperation(clientSocket, requestMessage)
 	userInfoLock.release()
+	print("944 released")
 	if (responseMessage[0] != 'M'):
 		print("\nFailed to join: roomserver error")
 		return
@@ -949,12 +982,14 @@ def do_Join():
 def do_Join_Debug(roomName):
 	global currentState, user
 	#check username
+	print("locked at 976")
 	userInfoLock.acquire()
 	if not user.hasUserName():
 		print("\nError: Please input username first!\n")
 		userInfoLock.release()
 		return
 	userInfoLock.release()
+	print("976 released")
 	# check if it is already in a chatroom
 	stateLock.acquire()
 	if currentState.inRoom():
@@ -964,19 +999,23 @@ def do_Join_Debug(roomName):
 		return
 	stateLock.release()
 	# send request to roomserver
+	print("locked at 993")
 	userInfoLock.acquire()
 	clientSocket = user._getClientSocket()
 	message = ':'.join([roomName, user._getname(), user._getip(), str(user._getport())])
 	requestMessage = 'J:' + message + PROTOCAL_END
 	responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
 	userInfoLock.release()
+	print("993 released")
 	successFlag = 0
 	if responseMessage is Exceptions['TIMEOUT']:
 		print('\nMain Thread: join request timeout, try again')
+		print("locked at 1004")
 		userInfoLock.acquire()
 		requestMessage = 'J:' + message + PROTOCAL_END
 		responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
 		userInfoLock.release()
+		print("1004 released")
 		if responseMessage is Exceptions['TIMEOUT']:
 			print('\nMain Thread: second try timeout, discard the join request')
 			successFlag = 0
@@ -1034,6 +1073,7 @@ def do_Send():
 	if len(backwardLinks) > 0 :
 		sendingList = sendingList + backwardLinks
 	# get all infos desired by sending Textmessage
+	print("locked at 1067")
 	userInfoLock.acquire()
 	userName = user._getname()
 	userIp = user._getip()
@@ -1041,6 +1081,7 @@ def do_Send():
 	# update msgID
 	msgID = currentState.newMsgID()
 	userInfoLock.release()
+	print("1067 released")
 
 	# construct the protocal message
 	originHID = sdbm_hash(userName+userIp+str(userPort))
@@ -1086,6 +1127,7 @@ def do_Send_Debug(inputData):
 	if len(backwardLinks) > 0 :
 		sendingList = sendingList + backwardLinks
 	# get all infos desired by sending Textmessage
+	print("locked at 1089")
 	userInfoLock.acquire()
 	userName = user._getname()
 	userIp = user._getip()
@@ -1093,6 +1135,7 @@ def do_Send_Debug(inputData):
 	# update msgID
 	msgID = currentState.newMsgID()
 	userInfoLock.release()
+	print("1089 released")
 
 	# construct the protocal message
 	originHID = sdbm_hash(userName+userIp+str(userPort))
@@ -1133,9 +1176,11 @@ def cleanUp():
 	if flag:
 		signalSocket = socket.socket()
 		try:
+			print("locked at 1138")
 			userInfoLock.acquire()
 			signalSocket.connect((user._getip(), user._getport()))
 			userInfoLock.release()
+			print("1138 released")
 			message = 'QUIT'+PROTOCAL_END
 			if socketOperationTimeout(signalSocket, message, 2) == "OK"+PROTOCAL_END:
 				print('successfully notice server thread to quit')

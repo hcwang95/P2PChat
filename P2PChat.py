@@ -430,7 +430,7 @@ def keepAliveThread():
 
 
 #
-# TODO: thread for handshake procedure
+# thread for handshake procedure
 # follow the logic of spec
 #
 def handShakeThread(startListen):
@@ -446,13 +446,13 @@ def handShakeThread(startListen):
 	while 1:
 		# update roominfo again
 		# and check state in order to quit elegantly
-
-
 		userInfoLock.acquire()
 		clientSocket = user._getClientSocket()
 		message = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
 		requestMessage = 'J:' + message + PROTOCAL_END
 		responseMessage = socketOperation(clientSocket, requestMessage)
+
+		# validate the responseMessage it get back
 		if (responseMessage[0] != 'M'):
 			print('Handshake: failed to request roomserver to update data')
 			CmdWin.insert(1.0, "\nroomserver error\n")
@@ -460,6 +460,8 @@ def handShakeThread(startListen):
 			continue
 		userInfoLock.release()
 		stateLock.acquire()
+
+		# check if it need to exit
 		checkExit("Handshake")
 		currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 		roomName = currentState._getroomname()
@@ -467,16 +469,15 @@ def handShakeThread(startListen):
 		msgID = currentState._getmsgid()
 		stateLock.release()
 		myPosition = findPosition(roomInfo, myName, myIp, myPort)
-		# print("myposition," , myPosition)
+
 		# calculate hash of each user in the chatroom
 		hashList = getHashList(roomInfo)
 		myHash = hashList[myPosition]
 		indexHashList = zip(range(len(hashList)), hashList)
 		gList = sorted(indexHashList, key=lambda x : x[1])
-		# print('gList',gList)
 		start = (gList.index((myPosition, myHash)) + 1) % len(gList)
-		# print('start',start)
-		# probe and connect
+
+		# probe and connect precedure
 		handShakeSocket = socket.socket()
 		while gList[start][0] != myPosition:
 			print('HandShake: approach user',roomInfo[1+3*gList[start][0]:4+3*gList[start][0]])
@@ -491,8 +492,6 @@ def handShakeThread(startListen):
 			else:
 				# try to approach by connecting
 				realIndex = gList[start][0]*3 + 1
-				# print('realIndex',realIndex)
-				# print('roomInfo', roomInfo)
 				try:
 					handShakeSocket.connect((roomInfo[realIndex+1], int(roomInfo[realIndex+2])))
 				except OSError as errmsg:
@@ -503,10 +502,10 @@ def handShakeThread(startListen):
 					handShakeSocket = socket.socket()
 					continue
 				
-				#### run peer to peer handshake
+				# run peer to peer handshake
 				message = ":".join([roomName,myName,myIp,str(myPort),str(msgID)])
 				requestMessage = 'P:' + message + PROTOCAL_END
-				### issue: what if there is no response?
+				# use blocking with timeout to handle no response case 
 				responseMessage = socketOperationTimeout(handShakeSocket, requestMessage, 1)
 				if responseMessage is Exceptions['TIMEOUT']:
 					print("HandShake: timeout, try another socket")
@@ -519,6 +518,7 @@ def handShakeThread(startListen):
 						'] but failed, try another')
 					start = (start + 1) % len(gList)
 					continue
+				# if sucessfully establish handshake (forwardlink)
 				if responseMessage[0] == 'S':
 					print('HandShake: successfully connect with a peer through peer-to-peer handshake with',
 						roomInfo[realIndex])
@@ -531,7 +531,8 @@ def handShakeThread(startListen):
 					forwardHash = sdbm_hash(hashStr)
 				break
 				
-					
+		# after first probing of forwardlink
+		# set up server socket no matter of success or not
 		if not startListen:
 			userInfoLock.acquire()
 			flag = user.bindServerSocket()
@@ -544,6 +545,7 @@ def handShakeThread(startListen):
 			serverThread = Thread(target=serverSocketThread, name='server')
 			serverThread.start()
 			startListen = 1
+		# if sucess then store the forwardlink info and quit
 		if successFlag == 1:
 			stateLock.acquire()
 			currentState.stateTransition(Actions['HANDSHAKE'])
@@ -551,10 +553,10 @@ def handShakeThread(startListen):
 			currentState._setforwardlink(handShakeTuple)
 			stateLock.release()
 			break
+		# if failed, report it in the terminal and then try 4 seconds later
 		else:
 			handshakeTime = PROTOCAL_TIME / 5
 			print('HandShake: currently cannot find a forward link with one loop, do it again', handshakeTime,'seconds later')
-			# print('startListen', startListen)
 			for i in range(4):
 				stateLock.acquire()
 				checkExit("Handshake")
@@ -562,8 +564,17 @@ def handShakeThread(startListen):
 				sleep(handshakeTime / 4)
 	print('HandShake: finish work and shutdown ... \n')
 
-
+#
+# server socket thread logic
+# core thread handle p2p process and message sending
+# constantly listening at the port after starting
+# handle 1. p2p backwardlink establishment
+#        2. message receiving and broadcast
+#		 3. handle backward or forward link quitting
+#           and trigger next round of p2p procedure
+#
 def serverSocketThread():
+	# setup basic variable
 	global user, currentState
 	print("Server Thread: start working ...")
 	userInfoLock.acquire()
@@ -581,15 +592,15 @@ def serverSocketThread():
 	hashList = getHashList(roomInfo)
 	readList = [serverSocket]
 	forwardLinkHash = None
-
-	testSocket = None
 	if (forwardLinkTuple):
 		readList.append(forwardLinkTuple[1])
 		forwardLinkHash = forwardLinkTuple[0]
+	# main loop
 	while 1:
-
+		# check exit condition
 		stateLock.acquire()
 		checkExit('Server Thread')
+		# check if there is a forward link
 		forwardLinkTuple = currentState._getforwardlink()
 		if forwardLinkTuple is not None and forwardLinkTuple[1] not in readList:
 			readList.append(forwardLinkTuple[1])
@@ -599,9 +610,12 @@ def serverSocketThread():
 			# print("Server Thread: havn't got forward link socket, try it later")
 		stateLock.release()
 		print('Server Thread: listening ...')
+		# use select to realize server listening procedure
 		try:
 			readable, writeable, exceptions = select(readList,[],[],PROTOCAL_TIME/5)
 		except Exception as errmsg:
+			# if server failed then close the program
+			# rarely happens in the test
 			print("Server Thread: encounter error", errmsg)
 			print("Server Thread: shutdown due to server socket ... ")
 			stateLock.acquire()
@@ -610,10 +624,8 @@ def serverSocketThread():
 			sys.exit(1)
 		if readable:
 			print('Server Thread: catch something')
-
-			# print('readable size', len(readable))
-			# print('readList size', len(readList))
 			for sockfd in readable:
+				# check forwardlink again
 				stateLock.acquire()
 				forwardLinkTuple = currentState._getforwardlink()
 				if forwardLinkTuple is not None and forwardLinkTuple[1] not in readList:
@@ -623,6 +635,7 @@ def serverSocketThread():
 					pass
 					# print("Server Thread: havn't got forward link socket, try it later")
 				stateLock.release()
+				# handle p2p connection procedure
 				if sockfd is serverSocket:
 					backwardLink, address = sockfd.accept()
 					requestData = backwardLink.recv(BUFSIZ)
@@ -637,6 +650,7 @@ def serverSocketThread():
 						for socketToClose in readList:
 							socketToClose.close()
 						sys.exit(0)
+					# check protocol pattern
 					pattern ="^P:[^:]+:[^:]+:(((\d+\.){3}\d+)|localhost):\d+:\d+::\r\n$"
 					if (re.match(pattern, requestMessage) is None):
 						print('Server Thread: receive an invlid request', requestMessage)
@@ -653,7 +667,7 @@ def serverSocketThread():
 					stateLock.acquire()
 					roomInfo = currentState._getroominfo()
 					stateLock.release()
-
+					# update room infomation if needed
 					if (findPosition(roomInfo, backwardLinkUserName, backwardLinkIp, backwardLinkPort) is None):
 						print('Server Thread: finding that there is no info of newly backward link, update roominfo and check again')
 						stateLock.acquire()
@@ -672,8 +686,7 @@ def serverSocketThread():
 						roomInfo = currentState._getroominfo()
 						stateLock.release()
 						print('Server Thread: Joined finish and check the info again')
-					# update forward link to avoid forwardlink send peers connection message
-
+					
 					if (findPosition(roomInfo, backwardLinkUserName, backwardLinkIp, backwardLinkPort) is None):
 						print('Server Thread: No info for the newly coming backward link')
 						print('Server Thread: refuse that request by ignoring it')
@@ -684,10 +697,10 @@ def serverSocketThread():
 						print('Server Thread: find a backward link from forward link peer, discard it')
 						backwardLink.close()
 						continue
+					# a valid backwardlink request, establish p2p connection
 					else:
 						print('Server Thread: match the info of newly coming backward link')
 						print('Server Thread: establish connection ...')
-						# establish connection with that socket
 						stateLock.acquire()
 						backwardLinkTuple = (sdbm_hash(backwardLinkUserName+backwardLinkIp+str(backwardLinkPort)),backwardLink)
 						currentState._addbackwardlinks(backwardLinkTuple)
@@ -701,11 +714,11 @@ def serverSocketThread():
 						# state transition if neccessary
 						currentState.stateTransition(Actions['HANDSHAKE'])
 						stateLock.release()
-						# update readList
+						# update readList for later listening
 						readList.append(backwardLink)
 						print('Server Thread: successfully connected a new backward link')
 				else:
-					print('Server Thread: Get an text message')
+					print('Server Thread: Get an message')
 
 					try:
 						messageData = sockfd.recv(BUFSIZ)
@@ -714,20 +727,18 @@ def serverSocketThread():
 						print('Server Thread: Exception happended, usually caused by the close connection.')
 						message = ''
 
-					
+					# extract header of the message
 					messageHeader = message.replace(PROTOCAL_END, '').split(':')[0:6]
 					# check if in the same room
 					print ("Server Thread: Receive message:", message)
 					if message == '':
 						print('Server Thread: Find a socket quit')
 						readList.remove(sockfd)
-						testSocket = sockfd
 						sockfd.close()
 						stateLock.acquire()
 						# if closing socket is forward link, remove it from the current state 
 						# and start handshake again
 						forwardLinkTuple = currentState._getforwardlink()
-						# print('forwardLinkTuple', forwardLinkTuple)
 						if forwardLinkTuple is not None:
 							if sockfd is forwardLinkTuple[1]:
 								currentState._removeforwardlink()
@@ -751,14 +762,16 @@ def serverSocketThread():
 								print("Server Thread: remove the backward link")
 						stateLock.release()
 						continue
-
+					# report if it's a invalid message
 					if messageHeader[0] != "T":
 						print('Server Thread: Unknown message')
 						continue
+					# report if it's from another room accidently
 					if messageHeader[1] != roomName:
 						print('Server Thread: Bad message from other chatroom')
 						CmdWin.insert(1.0, "\nError: Received an message from other chatroom\n")
 						continue
+					# check if update room info is needed
 					if not int(messageHeader[2]) in hashList:
 						print('Server Thread: Get an message with unknow sender, check roomserver for update')
 						stateLock.acquire()
@@ -788,24 +801,27 @@ def serverSocketThread():
 					if senderSocket is Exceptions['NOT_FIND_ERROR']:
 						pass
 						# print("Server Thread: cannot find sender socket")
-
+					# check if it's duplicated message
 					if int(messageHeader[4]) <= currentState._getmsgid():
 						print('Server Thread: Receive a previous message, discard it')
 						print('Server Thread: original megID is', currentState._getmsgid())
 						print('Server Thread: but now we get a message with msgID:',messageHeader[4])
+						# report true error, it is usual to have equal msgID
 						if int(messageHeader[4]) < currentState._getmsgid():
 							CmdWin.insert(1.0, '\nReceive a previous message!\n')
 						stateLock.release()
 						continue
+					# update msgID if the msgID is larger
 					currentState.updateMsgID(int(messageHeader[4]))
 					stateLock.release()
 					hashList = getHashList(roomInfo)
 					senderName = roomInfo[hashList.index(int(messageHeader[2]))*3+1]
+					# check sender name
 					if senderName != messageHeader[3]:
 						print('Server Thread: Find the username does not match the roominfo')
-
 						print('roomInfo,', roomInfo)
 						print('hashList.index(int(messageHeader[2]))*3+1', hashList.index(int(messageHeader[2]))*3+1)
+					# extract the message content
 					content = message.replace((':'.join(messageHeader)+':'), '').replace(PROTOCAL_END, '')
 					if len(content) == int(messageHeader[5]):
 						MsgWin.insert(1.0, '\n['+senderName+']: '+content)
@@ -821,7 +837,7 @@ def serverSocketThread():
 						if output is Exceptions['SOCKET_ERROR']:
 							print("Server Thread: failed to dispatch the message to ", listener.getsockname())
 				readable = []
-
+		# if select get timeout
 		else:
 			print ("Server Thread: idling")
 
@@ -875,7 +891,6 @@ def do_User():
 def do_List():
 
 	global user, currentState
-
 	CmdWin.insert(1.0, "\nPress List")
 	userInfoLock.acquire()
 	clientSocket = user._getClientSocket()
@@ -908,7 +923,6 @@ def do_List():
 
 def do_Join():
 	global currentState, user
-
 	CmdWin.insert(1.0, "\nPress JOIN")
 	#check username
 	userInfoLock.acquire()
@@ -988,7 +1002,7 @@ def do_Send():
 	stateLock.release()
 	if len(backwardLinks) > 0 :
 		sendingList = sendingList + backwardLinks
-	# get all infos desired by sending Textmessage
+	# get all infos desired by sending Text message
 	userInfoLock.acquire()
 	userName = user._getname()
 	userIp = user._getip()
@@ -1014,9 +1028,12 @@ def do_Send():
 	userentry.delete(0, END)
 
 def do_Quit():
-	CmdWin.insert(1.0, "\nPress Quit")
 	global currentState
+	# show in the command text area
+	CmdWin.insert(1.0, "\nPress Quit")
+	# clean and all sockets and inform server thread
 	cleanUp()
+	# transit to terminated state to notify all threads to quit
 	stateLock.acquire()
 	currentState.stateTransition(Actions['QUIT'])
 	stateLock.release()
@@ -1024,6 +1041,7 @@ def do_Quit():
 
 # clean up procedure to close all socket fds
 # try to connect server thread and send close function
+# finally close the GUI
 def cleanUp():
 	stateLock.acquire()
 	flag = currentState.isAfter(States['NAMED'])
@@ -1096,6 +1114,7 @@ def main():
 		print("P2PChat.py <server address> <server port no.> <my port no.>")
 		sys.exit(2)
 	global currentState, user
+	# initialize two crucial infomation containers
 	currentState = State()
 	user = User(sys.argv[1], int(sys.argv[2]), socket.gethostbyname(socket.gethostname()),int(sys.argv[3]))
 	win.mainloop()

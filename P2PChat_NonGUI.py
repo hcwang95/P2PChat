@@ -4,7 +4,7 @@
 # Student name and No.:     N/A
 # Development platform:     Ubuntu 1604
 # Python version: 			Python 3.5.2
-# Version: 					1.1
+# Version: 					0.1
 
 
 from tkinter import *
@@ -123,10 +123,7 @@ class User():
 	def _setname(self, name):
 		self._username = name
 	def _setip(self, ip):
-		if ip == '':
-			self._IP = 'localhost'
-		else:
-			self._IP = ip
+		self._IP = ip
 	def _setportnumber(self, port):
 		self._port = port
 	def _getname(self):
@@ -343,9 +340,9 @@ def socketOperationTimeout(socket, sendMessage, timeout):
 	except OSError as errmsg:
 		print('socket sending error: ', errmsg)
 		return Exceptions['SOCKET_ERROR']
-	available = select(readList, [], [], timeout)
-	if available:
-		sockfd = readList[0]
+	readable, writeable, exceptions  = select(readList, [], [], timeout)
+	if readable:
+		sockfd = readable[0]
 		try:
 			responseData = sockfd.recv(BUFSIZ)
 			return responseData.decode('ascii')
@@ -365,6 +362,7 @@ def keepAliveThread():
 		for i in range(20):
 			stateLock.acquire()
 			checkExit("Keep alive")
+			print('currentState:', currentState._getstate())
 			stateLock.release()
 			sleep(PROTOCAL_TIME / 20)
 		userInfoLock.acquire()
@@ -374,7 +372,7 @@ def keepAliveThread():
 		responseMessage = socketOperation(clientSocket, requestMessage)
 		userInfoLock.release()
 		if (responseMessage[0] != 'M'):
-			CmdWin.insert(1.0, "\nFailed to join: roomserver error\n")
+			print("\nFailed to join: roomserver error\n")
 			continue
 		stateLock.acquire()
 		currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
@@ -409,7 +407,7 @@ def handShakeThread(startListen):
 		responseMessage = socketOperation(clientSocket, requestMessage)
 		if (responseMessage[0] != 'M'):
 			print('Handshake: failed to request roomserver to update data')
-			CmdWin.insert(1.0, "\nroomserver error\n")
+			print("\nroomserver error\n")
 			userInfoLock.release()
 			continue
 		userInfoLock.release()
@@ -460,7 +458,7 @@ def handShakeThread(startListen):
 				#### run peer to peer handshake
 				message = ":".join([roomName,myName,myIp,str(myPort),str(msgID)])
 				requestMessage = 'P:' + message + PROTOCAL_END
-				### issue: what if there is no response?
+				### send request message with timeout limit
 				responseMessage = socketOperationTimeout(handShakeSocket, requestMessage, 1)
 				if responseMessage is Exceptions['TIMEOUT']:
 					print("HandShake: timeout, try another socket")
@@ -478,7 +476,10 @@ def handShakeThread(startListen):
 						roomInfo[realIndex])
 					message = responseMessage.replace(PROTOCAL_END, '').split(':')[1:]
 					stateLock.acquire()
-					currentState.updateMsgID(int(message[0]))
+					try:
+						currentState.updateMsgID(int(message[0]))
+					except Exception:
+						print('Handshake: some error -> msgID:$', (message[0]))
 					stateLock.release()
 					successFlag = 1
 					hashStr = reduce(lambda x, y: x+y, roomInfo[realIndex: realIndex+3])
@@ -591,9 +592,9 @@ def serverSocketThread():
 						for socketToClose in readList:
 							socketToClose.close()
 						sys.exit(0)
-					pattern ="^P:[^:]+:[^:]+:(((\d+\.){3}\d+)|localhost):\d+:\d+::\r\n$"
+					pattern = "^P:[^:]+:[^:]+:(((\d+\.){3}\d+)|localhost):\d+:\d+::\r\n$"
 					if (re.match(pattern, requestMessage) is None):
-						print('Server Thread: receive an invlid request', requestMessage)
+						print('Server Thread: receive a invlid request', requestMessage)
 						print('Server Thread: refuse that request by ignoring it')
 						backwardLink.close()
 						continue
@@ -612,6 +613,7 @@ def serverSocketThread():
 						print('Server Thread: finding that there is no info of newly backward link, update roominfo and check again')
 						stateLock.acquire()
 						message_ = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
+						stateLock.release()
 						requestMessage = 'J:' + message_ + PROTOCAL_END
 						responseMessage = socketOperation(clientSocket, requestMessage)
 						if (responseMessage[0] != 'M'):
@@ -620,8 +622,8 @@ def serverSocketThread():
 							if (responseMessage[0] != 'M'):
 								print("Server Thread: Failed to join: roomserver error, discard current action")
 								backwardLink.close()
-								stateLock.release()
 								continue
+						stateLock.acquire()
 						currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 						roomInfo = currentState._getroominfo()
 						stateLock.release()
@@ -647,10 +649,12 @@ def serverSocketThread():
 						currentState._addbackwardlinks(backwardLinkTuple)
 						msgID = currentState._getmsgid()
 						responseMessage = "S:" + str(msgID) + "::\r\n"
+						print('Server Thread: return msgID', msgID)
 						output = socketOperation(backwardLink, responseMessage, receive = False)
 						if output == Exceptions["SOCKET_ERROR"]:
 							print('Server Thread: Failed to send back data')
 							handShakeSocket = socket.socket()
+							stateLock.release()
 							continue
 						# state transition if neccessary
 						currentState.stateTransition(Actions['HANDSHAKE'])
@@ -666,6 +670,8 @@ def serverSocketThread():
 						message = messageData.decode('ascii')
 					except:
 						print('Server Thread: Exception happended, usually caused by the close connection.')
+						print('Origin:', sockfd)
+						print('is same with last socket??', sockfd == testSocket)
 						message = ''
 
 					
@@ -711,12 +717,13 @@ def serverSocketThread():
 						continue
 					if messageHeader[1] != roomName:
 						print('Server Thread: Bad message from other chatroom')
-						CmdWin.insert(1.0, "\nError: Received an message from other chatroom\n")
+						print("\nError: Received an message from other chatroom\n")
 						continue
 					if not int(messageHeader[2]) in hashList:
 						print('Server Thread: Get an message with unknow sender, check roomserver for update')
 						stateLock.acquire()
 						message_ = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
+						stateLock.release()
 						requestMessage = 'J:' + message_ + PROTOCAL_END
 						responseMessage = socketOperation(clientSocket, requestMessage)
 						if (responseMessage[0] != 'M'):
@@ -724,8 +731,8 @@ def serverSocketThread():
 							responseMessage = socketOperation(clientSocket, requestMessage)
 							if (responseMessage[0] != 'M'):
 								print("Server Thread: Failed to join: roomserver error, discard current action")
-								stateLock.release()
 								continue
+						stateLock.acquire()
 						currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
 						roomInfo = currentState._getroominfo()
 						stateLock.release()
@@ -748,7 +755,7 @@ def serverSocketThread():
 						print('Server Thread: original megID is', currentState._getmsgid())
 						print('Server Thread: but now we get a message with msgID:',messageHeader[4])
 						if int(messageHeader[4]) < currentState._getmsgid():
-							CmdWin.insert(1.0, '\nReceive a previous message!\n')
+							print('\nReceive a previous message!\n')
 						stateLock.release()
 						continue
 					currentState.updateMsgID(int(messageHeader[4]))
@@ -762,7 +769,7 @@ def serverSocketThread():
 						print('hashList.index(int(messageHeader[2]))*3+1', hashList.index(int(messageHeader[2]))*3+1)
 					content = message.replace((':'.join(messageHeader)+':'), '').replace(PROTOCAL_END, '')
 					if len(content) == int(messageHeader[5]):
-						MsgWin.insert(1.0, '\n['+senderName+']: '+content)
+						print('\n['+senderName+']: '+content)
 					else:
 						print("Server Thread: the length content does not match the header")
 						continue
@@ -777,7 +784,7 @@ def serverSocketThread():
 				readable = []
 
 		else:
-			print ("Server Thread: idling")
+			print ("Server Thread",multiprocessing.current_process().name,": idling")
 
 
 #
@@ -791,12 +798,12 @@ def do_User():
 	invalidMessage = ['invalid username',
 					  'change username after join']
 	outstr = "\n[User] username: " + userentry.get()
-	CmdWin.insert(1.0, outstr)
+	print(outstr)
 	username = userentry.get()
 	# check if is joined.
 	stateLock.acquire()
 	if currentState.isAfter(States['NAMED']):
-		CmdWin.insert(1.0, '\nFailed: ' + invalidMessage[1] + '\n')
+		print('\nFailed: ' + invalidMessage[1] + '\n')
 		print('\nFailed: ' + invalidMessage[1])
 		stateLock.release()
 		return
@@ -805,7 +812,7 @@ def do_User():
 	userInfoLock.acquire()
 	flag = user.hasUserName()
 	if (user.setUserName(username) is Exceptions['INVALID_USERNAME']):
-		CmdWin.insert(1.0, '\nFailed: ' + invalidMessage[0] +'\n')
+		print('\nFailed: ' + invalidMessage[0] +'\n')
 		print('\nFailed: ' + invalidMessage[0])
 		userInfoLock.release()
 		return
@@ -818,19 +825,47 @@ def do_User():
 	userentry.delete(0, END)
 	# give some output in CmdWin
 	if flag:
-		CmdWin.insert(1.0, '\nSuccess: change name to '+username+' \n')
+		print('\nSuccess: change name to '+username+' \n')
 		print('\nSuccess: change name to '+username+' \n')
 	else:
-		CmdWin.insert(1.0, '\nSuccess: set your nickname as '+username+' \n')
+		print('\nSuccess: set your nickname as '+username+' \n')
 		print('\nSuccess: set your nickname as '+username+' \n')
 
+# function for debuging in the command line
+def do_User_Debug(username):
+
+	global currentState, user
+
+	invalidMessage = ['invalid username',
+					  'change username after join']
+	# outstr = "\n[User] username: "+userentry.get()
+	# print(outstr)
+	# username = userentry.get()
+	# check if is joined.
+	stateLock.acquire()
+	if currentState.isAfter(States['NAMED']):
+		print('Failed: ' + invalidMessage[1])
+		stateLock.release()
+		return
+	stateLock.release()
+	# change the username
+	userInfoLock.acquire()
+	if (user.setUserName(username) is Exceptions['INVALID_USERNAME']):
+		print('Failed: ' + invalidMessage[0])
+		userInfoLock.release()
+		return
+	userInfoLock.release()
+	# set state to named
+	stateLock.acquire()
+	currentState.stateTransition(Actions['USER'])
+	stateLock.release()
 
 
-def do_List():
+# function for debuging in the command line
+def do_List_Debug():
 
 	global user, currentState
 
-	CmdWin.insert(1.0, "\nPress List")
 	userInfoLock.acquire()
 	clientSocket = user._getClientSocket()
 	requestMessage = 'L' + PROTOCAL_END
@@ -846,28 +881,25 @@ def do_List():
 			print('\nMain Thread: second try timeout, discard the list request')
 		else:
 			presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
-			CmdWin.insert(1.0, "\nHere are the active chatrooms:\n"+presentMessage+'\n')
+			print("\nHere are the active chatrooms:\n"+presentMessage+'\n')
 	else:
 		presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
-		CmdWin.insert(1.0, "\nHere are the active chatrooms:\n"+presentMessage+'\n')
-	# no need actually but standard for state transition procedure
+		print("\nHere are the active chatrooms:\n"+presentMessage+'\n')
+	
+
+	# no need actually but stard
 	stateLock.acquire()
 	currentState.stateTransition(Actions['LIST'])
 	stateLock.release()
 
-	
-	
-
-
-
 def do_Join():
 	global currentState, user
 
-	CmdWin.insert(1.0, "\nPress JOIN")
+	print("\nPress JOIN")
 	#check username
 	userInfoLock.acquire()
 	if not user.hasUserName():
-		CmdWin.insert(1.0, "\nError: Please input username first!\n")
+		print("\nError: Please input username first!\n")
 		print("\nError: Please input username first!\n")
 		userInfoLock.release()
 		return
@@ -875,7 +907,7 @@ def do_Join():
 	# check if it is already in a chatroom
 	stateLock.acquire()
 	if currentState.inRoom():
-		CmdWin.insert(1.0, "\nError: You are already in the chat room!\n")
+		print("\nError: You are already in the chat room!\n")
 		print("\nError: You are already in the chat room!\n")
 		stateLock.release()
 		return
@@ -883,7 +915,7 @@ def do_Join():
 	# get and validate the name of chatroom
 	roomName = userentry.get()
 	if (re.match('^[\x00-\x7f]+$', roomName) is None) or (':' in roomName):
-		CmdWin.insert(1.0, "\nFailed: invalid room name")
+		print("\nFailed: invalid room name")
 		print("\nFailed: invalid room name")
 		return
 	# send request to roomserver
@@ -894,10 +926,10 @@ def do_Join():
 	responseMessage = socketOperation(clientSocket, requestMessage)
 	userInfoLock.release()
 	if (responseMessage[0] != 'M'):
-		CmdWin.insert(1.0, "\nFailed to join: roomserver error")
+		print("\nFailed to join: roomserver error")
 		return
 	presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[2::3])
-	CmdWin.insert(1.0, '\nJoin Success!\nHere are members in the room:\n' + presentMessage+ '\n' )
+	print('\nJoin Success!\nHere are members in the room:\n' + presentMessage+ '\n' )
 	print('\nJoin Success!\nHere are members in the room:\n' + presentMessage)
 	# change the state if success
 	stateLock.acquire()
@@ -913,21 +945,80 @@ def do_Join():
 	# open the handshake thread
 	handShake = Thread(target=handShakeThread, name='handShake', args=(0,))
 	handShake.start()
+# function for debuging in the command line
+def do_Join_Debug(roomName):
+	global currentState, user
+	#check username
+	userInfoLock.acquire()
+	if not user.hasUserName():
+		print("\nError: Please input username first!\n")
+		userInfoLock.release()
+		return
+	userInfoLock.release()
+	# check if it is already in a chatroom
+	stateLock.acquire()
+	if currentState.inRoom():
+		print("nError: You are already in the chat room!\n")
+		print("\nError: You are already in the chat room!\n")
+		stateLock.release()
+		return
+	stateLock.release()
+	# send request to roomserver
+	userInfoLock.acquire()
+	clientSocket = user._getClientSocket()
+	message = ':'.join([roomName, user._getname(), user._getip(), str(user._getport())])
+	requestMessage = 'J:' + message + PROTOCAL_END
+	responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
+	userInfoLock.release()
+	successFlag = 0
+	if responseMessage is Exceptions['TIMEOUT']:
+		print('\nMain Thread: join request timeout, try again')
+		userInfoLock.acquire()
+		requestMessage = 'J:' + message + PROTOCAL_END
+		responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
+		userInfoLock.release()
+		if responseMessage is Exceptions['TIMEOUT']:
+			print('\nMain Thread: second try timeout, discard the join request')
+			successFlag = 0
+		else:
+			successFlag = 1
+	else:
+		successFlag = 1
 
+	if successFlag:
+		if (responseMessage[0] != 'M'):
+			print("\nFailed to join: roomserver error")
+			return
+		presentMessage = '\n'.join(responseMessage.replace(PROTOCAL_END,'').split(':')[2::3])
+		print("\nJoin Success!\nHere are members in the room:\n" + presentMessage + '\n')
+		# change the state if success
+		stateLock.acquire()
+		currentState.stateTransition(Actions['JOIN'])	
+		currentState.updateRoomName(roomName)
+		currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
+		stateLock.release()
+
+		# open the keep alive thread
+		keepAlive = Thread(target=keepAliveThread, name='keepAlive')
+		keepAlive.start()
+		# open the handshake thread
+		handShake = Thread(target=handShakeThread, name='handShake', args=(0,))
+		handShake.start()
 
 def do_Send():
 	global currentState, user
-	CmdWin.insert(1.0, "\nPress Send")
+	print("\nPress Send")
 	# check stage
 	stateLock.acquire()
 	checkFlag = currentState.isAfter(States['NAMED'])
 	stateLock.release()
 	if not checkFlag:
-		CmdWin.insert(1.0, "\nSend Error: You are not in any chatroom, please join a chatroom first!")
+		print("\nSend Error: You are not in any chatroom, please join a chatroom first!")
+		userentry.delete(0, END)
 		return
 	inputData = userentry.get()
 	if len(inputData.strip(' ')) == 0:
-		CmdWin.insert(1.0, "\nSend Error: Invalid message!")
+		print("\nSend Error: Invalid message!")
 		return
 	# check for all back and forward link
 	sendingList = []
@@ -962,13 +1053,70 @@ def do_Send():
 		output = socketOperation(socket, requestMessage, receive = False)
 		if output == Exceptions['SOCKET_ERROR']:
 			print('Send Error: cannot sent the message to', socket.getsockname())
-	MsgWin.insert(1.0, '\n['+userName+']: '+inputData)
+	print('\n['+userName+']: '+inputData)
 
 	# clear the entry if success
 	userentry.delete(0, END)
 
+
+def do_Send_Debug(inputData):
+	global currentState, user
+	# check stage
+	stateLock.acquire()
+	checkFlag = currentState.isAfter(States['NAMED'])
+	stateLock.release()
+	if not checkFlag:
+		print("\nSend Error: You are not in any chatroom, please join a chatroom first!")
+		return
+	if len(inputData.strip(' ')) == 0:
+		print("\nSend Error: Invalid message!")
+		return
+	
+	# check for all back and forward link
+	sendingList = []
+	stateLock.acquire()
+	forwardLinkTuple = currentState._getforwardlink()
+	if forwardLinkTuple is not None:
+		forwardLink = forwardLinkTuple[1] 
+		sendingList.append(forwardLink)
+	backwardLinkTupleList = currentState._getbackwardlinks()
+	backwardLinks = [i[1] for i in backwardLinkTupleList]
+	roomName = currentState._getroomname()
+	stateLock.release()
+	if len(backwardLinks) > 0 :
+		sendingList = sendingList + backwardLinks
+	# get all infos desired by sending Textmessage
+	userInfoLock.acquire()
+	userName = user._getname()
+	userIp = user._getip()
+	userPort = user._getport()
+	# update msgID
+	msgID = currentState.newMsgID()
+	userInfoLock.release()
+
+	# construct the protocal message
+	originHID = sdbm_hash(userName+userIp+str(userPort))
+	message = [roomName, str(originHID), userName, str(msgID), str(len(inputData)), inputData]
+	requestMessage = 'T:' + ':'.join(message) + PROTOCAL_END
+	print("\nMain Thread: perform the sending process, dispatch data to other peers\n")
+
+	print('Message:', requestMessage)
+	for socket in sendingList:
+		output = socketOperation(socket, requestMessage, receive = False)
+		if output == Exceptions['SOCKET_ERROR']:
+			print('Send Error: cannot sent the message one of the peer')
+	print('\n['+userName+']: '+inputData)
+
 def do_Quit():
-	CmdWin.insert(1.0, "\nPress Quit")
+	print("\nPress Quit")
+	global currentState
+	cleanUp()
+	stateLock.acquire()
+	currentState.stateTransition(Actions['QUIT'])
+	stateLock.release()
+	exit(0)
+
+def do_Quit_Debug():
 	global currentState
 	cleanUp()
 	stateLock.acquire()
@@ -997,64 +1145,60 @@ def cleanUp():
 				print('cannot manually inform the server thread, please wait at most 20 seconds to let it close')
 		except Exception as errmsg:
 			print("Quit Error: Cannot connect server socket, give up trying ...")
-	win.destroy()
+	# win.destroy()
 
 #
-# Set up of Basic UI
-#
-win = Tk()
-win.title("MyP2PChat")
 
-#Top Frame for Message display
-topframe = Frame(win, relief=RAISED, borderwidth=1)
-topframe.pack(fill=BOTH, expand=True)
-topscroll = Scrollbar(topframe)
-MsgWin = Text(topframe, height='15', padx=5, pady=5, fg="red", exportselection=0, insertofftime=0)
-MsgWin.pack(side=LEFT, fill=BOTH, expand=True)
-topscroll.pack(side=RIGHT, fill=Y, expand=True)
-MsgWin.config(yscrollcommand=topscroll.set)
-topscroll.config(command=MsgWin.yview)
+def randName():
+	import random
+	rand = random.randint(1, 10000)
+	return ''.join((list(map(chr, [int(i) + 97 for i  in str(rand)]))))
 
-#Top Middle Frame for buttons
-topmidframe = Frame(win, relief=RAISED, borderwidth=1)
-topmidframe.pack(fill=X, expand=True)
-Butt01 = Button(topmidframe, width='8', relief=RAISED, text="User", command=do_User)
-Butt01.pack(side=LEFT, padx=8, pady=8);
-Butt02 = Button(topmidframe, width='8', relief=RAISED, text="List", command=do_List)
-Butt02.pack(side=LEFT, padx=8, pady=8);
-Butt03 = Button(topmidframe, width='8', relief=RAISED, text="Join", command=do_Join)
-Butt03.pack(side=LEFT, padx=8, pady=8);
-Butt04 = Button(topmidframe, width='8', relief=RAISED, text="Send", command=do_Send)
-Butt04.pack(side=LEFT, padx=8, pady=8);
-Butt05 = Button(topmidframe, width='8', relief=RAISED, text="Quit", command=do_Quit)
-Butt05.pack(side=LEFT, padx=8, pady=8);
+def randomFunctionCall(parameter, itr):
+	import random
+	rand = random.randint(1, 10000)
+	index = rand%5
+	if itr<900 and index == 4:
+		index = index -1
 
-#Lower Middle Frame for User input
-lowmidframe = Frame(win, relief=RAISED, borderwidth=1)
-lowmidframe.pack(fill=X, expand=True)
-userentry = Entry(lowmidframe, fg="blue")
-userentry.pack(fill=X, padx=4, pady=4, expand=True)
+	{0: lambda x : do_User_Debug(x),
+	1: lambda x : do_List_Debug(),
+	2: lambda x : do_Join_Debug('test'),
+	3: lambda x : do_Send_Debug(x),
+	4: lambda x : do_Quit_Debug()}[index](parameter)
+	if index == 4:
+		return 1
+	else:
+		return 0
 
-#Bottom Frame for displaying action info
-bottframe = Frame(win, relief=RAISED, borderwidth=1)
-bottframe.pack(fill=BOTH, expand=True)
-bottscroll = Scrollbar(bottframe)
-CmdWin = Text(bottframe, height='15', padx=5, pady=5, exportselection=0, insertofftime=0)
-CmdWin.pack(side=LEFT, fill=BOTH, expand=True)
-bottscroll.pack(side=RIGHT, fill=Y, expand=True)
-CmdWin.config(yscrollcommand=bottscroll.set)
-bottscroll.config(command=CmdWin.yview)
+def main(port):
 
-def main():
-	if len(sys.argv) != 4:
-		print("P2PChat.py <server address> <server port no.> <my port no.>")
-		sys.exit(2)
 	global currentState, user
 	currentState = State()
-	user = User(sys.argv[1], int(sys.argv[2]), socket.gethostbyname(socket.gethostname()),int(sys.argv[3]))
-	win.mainloop()
-
+	user = User('localhost', 32340, 'localhost' , port)
+	for i in range(1000):
+		if 1 == randomFunctionCall(randName(), i):
+			break
+	print('finish: port', port)
 
 if __name__ == "__main__":
-	main()
+	for j in range(100):
+		import random
+		import multiprocessing
+		portList = []
+		threadList = []
+		for i in range(10):
+			randPort = random.randint(49990, 59990)
+			if randPort in portList:
+				continue
+			else:
+				portList.append(randPort)
+				name = 'processWithPort '+str(randPort)
+				thread = multiprocessing.Process(target=main, args=(randPort,), name=name)
+				threadList.append(thread)
+				thread.start()
+		for i in threadList:
+			i.join()
+		print('finally wrapup')
+		sleep(2)
 

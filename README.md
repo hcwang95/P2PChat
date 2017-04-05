@@ -9,7 +9,6 @@ with a naive GUI supported by Python.
 
 Currently the program is only tested on Ubuntu 1604 with python version 3.5.2
 
-Other python dependency is based on [requirement.txt](https://github.com/whcacademy/P2PChatServer/blob/master/README.md)
 
 
 ## Getting Started
@@ -38,7 +37,7 @@ run
 ```
 python3 P2PChat.py localhost 32340 50000
 ```
-Note that the last argument is the port number which is needed to change if multiple clients are initialized
+Note that the last argument is the port number which is needed to change if multiple clients are initialized.
 
 ## Versioning
 
@@ -50,7 +49,7 @@ Try to use [SemVer](http://semver.org/) for versioning. For the versions availab
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details
+This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
 
 ## Acknowledgments
 

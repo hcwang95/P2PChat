@@ -25,13 +25,20 @@ clone the project to local folder
 git clone git@github.com:whcacademy/P2PChatServer.git
 ```
 
-
 ## Running the tests
 
 Firstly, run the room server which is provided by course instructor.
+```
+./room_server_64 # depend on the OS
+```
 
 Then, test cases now are currently included by the spec in [spec.pdf](https://github.com/whcacademy/P2PChatServer/blob/master/2016-17-Programming-Project.pdf)
 
+run 
+```
+python3 P2PChat.py localhost 32340 50000
+```
+Note that the last argument is the port number which is needed to change if multiple clients are initialized
 
 ## Versioning
 

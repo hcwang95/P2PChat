@@ -406,7 +406,7 @@ def checkExit(threadName):
 #
 def keepAliveThread():
 	global currentState, user
-	print('keep alive thread start working ... ')
+	print('\nkeep alive thread start working ... ')
 	while True:
 		for i in range(20):
 			stateLock.acquire()
@@ -552,11 +552,12 @@ def handShakeThread(startListen):
 			handShakeTuple = (forwardHash, handShakeSocket)
 			currentState._setforwardlink(handShakeTuple)
 			stateLock.release()
+			CmdWin.insert(1.0, '\nSuccessfully connected with one of the peer in the chatroom!\n')
 			break
 		# if failed, report it in the terminal and then try 4 seconds later
 		else:
 			handshakeTime = PROTOCAL_TIME / 5
-			print('HandShake: currently cannot find a forward link with one loop, do it again', handshakeTime,'seconds later')
+			print('HandShake: currently cannot find a forward link with one loop, do it again', handshakeTime,'seconds later\n')
 			for i in range(4):
 				stateLock.acquire()
 				checkExit("Handshake")
@@ -576,7 +577,7 @@ def handShakeThread(startListen):
 def serverSocketThread():
 	# setup basic variable
 	global user, currentState
-	print("Server Thread: start working ...")
+	print("\nServer Thread: start working ...")
 	userInfoLock.acquire()
 	serverSocket = user._getServerSocket()
 	clientSocket = user._getClientSocket()
@@ -623,7 +624,7 @@ def serverSocketThread():
 			stateLock.release()
 			sys.exit(1)
 		if readable:
-			print('Server Thread: catch something')
+			print('\nServer Thread: catch something')
 			for sockfd in readable:
 				# check forwardlink again
 				stateLock.acquire()
@@ -717,6 +718,7 @@ def serverSocketThread():
 						# update readList for later listening
 						readList.append(backwardLink)
 						print('Server Thread: successfully connected a new backward link')
+						CmdWin.insert(1.0, '\nsuccessfully receive a connecting request and establish connection\n')
 				else:
 					print('Server Thread: Get an message')
 
@@ -744,6 +746,7 @@ def serverSocketThread():
 								currentState._removeforwardlink()
 								print('Server Thread: remove the forward link')
 								print('Server Thread: start handshake thread again')
+								CmdWin.insert(1.0, '\ndetected the forward link peer quit, try to establish forwardlink again\n')
 								handShake = Thread(target=handShakeThread, name='handShake', args=(1,))
 								handShake.start()
 							else:
@@ -752,6 +755,7 @@ def serverSocketThread():
 								if currentState._removebackwardlinksBySocket(sockfd) is Exceptions['BACKWARDLINK_NOT_EXIST']:
 									print("Server Thread: cannot find the particular quitting socket")
 								else:
+									CmdWin.insert(1.0, '\ndetected one of the backward links peer quit, release the connection\n')
 									print("Server Thread: remove the backward link")
 						else:
 							# if it is backwardlink 

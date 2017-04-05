@@ -409,16 +409,22 @@ def handShakeThread(startListen):
 		message = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
 		requestMessage = 'J:' + message + PROTOCAL_END
 		print('socketoperation starts')
-		responseMessage = socketOperation(clientSocket, requestMessage)
-		print('socketoperation finishes')
-		if (responseMessage[0] != 'M'):
-			print('Handshake: failed to request roomserver to update data')
-			print("\nroomserver error\n")
+		responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
+		if responseMessage is Exceptions['TIMEOUT']:
+			print('Handshake: request timeout, try again')
+		elif socketOperationTimeout(clientSocket, requestMessage, 1) is Exceptions['TIMEOUT']:
+			print('Handshake: request timeout again, discard the request')
+			userInfoLock.release()
+		else:
+			print('socketoperation finishes')
+			if (responseMessage[0] != 'M'):
+				print('Handshake: failed to request roomserver to update data')
+				print("\nroomserver error\n")
+				print("406 released")
+				userInfoLock.release()
+				continue
 			print("406 released")
 			userInfoLock.release()
-			continue
-		print("406 released")
-		userInfoLock.release()
 		stateLock.acquire()
 		checkExit("Handshake")
 		currentState.updateRoomInfo(responseMessage.replace(PROTOCAL_END,'').split(':')[1:])
@@ -631,10 +637,10 @@ def serverSocketThread():
 						message_ = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
 						stateLock.release()
 						requestMessage = 'J:' + message_ + PROTOCAL_END
-						responseMessage = socketOperation(clientSocket, requestMessage)
+						responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
 						if (responseMessage[0] != 'M'):
 							print("Server Thread: Failed to join: roomserver error, try again")
-							responseMessage = socketOperation(clientSocket, requestMessage)
+							responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
 							if (responseMessage[0] != 'M'):
 								print("Server Thread: Failed to join: roomserver error, discard current action")
 								backwardLink.close()
@@ -741,10 +747,10 @@ def serverSocketThread():
 						message_ = ':'.join([currentState._getroomname(), user._getname(), user._getip(), str(user._getport())])
 						stateLock.release()
 						requestMessage = 'J:' + message_ + PROTOCAL_END
-						responseMessage = socketOperation(clientSocket, requestMessage)
+						responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
 						if (responseMessage[0] != 'M'):
 							print("Server Thread: Failed to join: roomserver error, try again")
-							responseMessage = socketOperation(clientSocket, requestMessage)
+							responseMessage = socketOperationTimeout(clientSocket, requestMessage, 1)
 							if (responseMessage[0] != 'M'):
 								print("Server Thread: Failed to join: roomserver error, discard current action")
 								continue

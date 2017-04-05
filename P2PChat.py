@@ -981,6 +981,10 @@ def do_Join():
 
 def do_Send():
 	global currentState, user
+	inputData = userentry.get()
+	if len(inputData.strip(' ')) == 0:
+		print('Detect nothing to send!\n')
+		return
 	CmdWin.insert(1.0, "\nPress Send")
 	# check stage
 	stateLock.acquire()
@@ -989,10 +993,7 @@ def do_Send():
 	if not checkFlag:
 		CmdWin.insert(1.0, "\nSend Error: You are not in any chatroom, please join a chatroom first!")
 		return
-	inputData = userentry.get()
-	if len(inputData.strip(' ')) == 0:
-		CmdWin.insert(1.0, "\nSend Error: Invalid message!")
-		return
+	
 	# check for all back and forward link
 	sendingList = []
 	stateLock.acquire()

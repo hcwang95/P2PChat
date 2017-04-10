@@ -41,7 +41,7 @@ Note that the last argument is the port number which is needed to change if mult
 
 ## Versioning
 
-Try to use [SemVer](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/your/project/tags). 
+Try to use [SemVer](http://semver.org/) for versioning.
 
 ## Authors
 

@@ -21,7 +21,7 @@ set up virtual environment according to [this guide](http://python-guide-pt-br.r
 
 clone the project to local folder
 ```
-git clone git@github.com:whcacademy/P2PChatServer.git
+git clone git@github.com:whcacademy/P2PChat.git
 ```
 
 ## Running the tests
